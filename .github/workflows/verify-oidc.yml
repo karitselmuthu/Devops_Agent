@@ -1,0 +1,26 @@
+name: Verify AWS OIDC
+
+# Creates nothing in AWS. Proves GitHub can assume the deploy role.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: AWS environment
+        type: choice
+        options: [staging, production]
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: aws sts get-caller-identity
