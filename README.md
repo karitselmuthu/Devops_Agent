@@ -86,6 +86,16 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
 
 ## AWS release setup
 
+### AWS access options
+
+- **Local setup:** AWS CLI 2.32.0 or later supports `aws login`, which opens an
+  interactive sign-in and supplies short-lived credentials to the CLI and SDK.
+  Verify the selected account with `aws sts get-caller-identity` before any
+  bootstrap or deployment command. Keep local credentials out of this repository.
+- **GitHub deployment:** Configure the GitHub Actions workflow to assume a
+  repository-scoped AWS IAM role through OIDC. Set `AWS_DEPLOY_ROLE_ARN` in the
+  selected GitHub environment. Do not put AWS access keys in GitHub secrets.
+
 1. Choose an AWS account, Region, public Route 53 hosted zone, API domain, and
    an ACM certificate for that domain in the same Region as the load balancer.
    Bootstrap the account and Region with `npx aws-cdk bootstrap` using an
