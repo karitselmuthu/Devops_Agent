@@ -1,0 +1,52 @@
+name: Deploy AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: AWS environment
+        type: choice
+        options: [staging, production]
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      CERTIFICATE_ARN: ${{ vars.CERTIFICATE_ARN }}
+      API_DOMAIN: ${{ vars.API_DOMAIN }}
+      HOSTED_ZONE_ID: ${{ vars.HOSTED_ZONE_ID }}
+      ALLOWED_REPOSITORIES: ${{ vars.ALLOWED_REPOSITORIES }}
+      ALLOWED_PIPELINES: ${{ vars.ALLOWED_PIPELINES }}
+      ALLOWED_STACKS: ${{ vars.ALLOWED_STACKS }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+      AGENTS_GITHUB_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+      AGENTS_OPENAI_API_KEY: ${{ secrets.AGENTS_OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: latest-known
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra test --extra infra
+      - run: uv run --no-sync pytest -q
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - run: uv run --no-sync python scripts/deploy_aws.py

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: latest-known
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra test --extra infra
+      - run: uv run --no-sync pytest -q
+      - run: uv run --no-sync python infra/app.py
+      - run: docker build --platform linux/amd64 -t agents-platform:ci .

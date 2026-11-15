@@ -1,0 +1,34 @@
+[project]
+name = "devops-agent"
+version = "0.1.0"
+description = "Python agents platform skeleton"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.14,<2",
+    "boto3>=1.35,<2",
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pyjwt[crypto]>=2.10,<3",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.27,<1", "pytest>=8,<10"]
+code-agent = ["openai>=2,<3"]
+security-agent = ["bandit>=1.8,<2"]
+devops-agent = []
+infra = ["aws-cdk-lib>=2.270,<3", "constructs>=10,<11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agents_platform", "src/agents_shared", "src/planning_agent", "src/mcp_hub", "src/agents"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
