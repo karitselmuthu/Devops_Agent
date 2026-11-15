@@ -1,7 +1,7 @@
 [project]
 name = "devops-agent"
 version = "0.1.0"
-description = "Python agents platform skeleton"
+description = "Python DevOps agents platform for code proposals, security scans, CI/CD, AWS infrastructure, and monitoring"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
