@@ -32,14 +32,18 @@ AGENTS = ("CODE", "SECURITY", "DEVOPS", "INFRA", "MONITORING")
 
 
 class AgentsPlatformStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, *, production: bool, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *, production: bool,
+                 with_domain: bool, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         if production:
             self.termination_protection = True
 
-        certificate_arn = CfnParameter(self, "CertificateArn", type="String")
-        domain_name = CfnParameter(self, "DomainName", type="String")
-        hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
+        # Without a domain (staging only) the API is served over plain HTTP on the
+        # load balancer's own DNS name, so no certificate or DNS record is needed.
+        if with_domain:
+            certificate_arn = CfnParameter(self, "CertificateArn", type="String")
+            domain_name = CfnParameter(self, "DomainName", type="String")
+            hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
         image_tag = CfnParameter(self, "ImageTag", type="String", default="bootstrap")
         migration_image_tag = CfnParameter(self, "MigrationImageTag", type="String", default="bootstrap")
         desired_count = CfnParameter(self, "DesiredCount", type="Number", default=0)
@@ -183,27 +187,30 @@ class AgentsPlatformStack(Stack):
             security_groups=[api_sg],
         )
         alb = elbv2.ApplicationLoadBalancer(self, "LoadBalancer", vpc=vpc, internet_facing=True)
-        listener = alb.add_listener(
-            "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
-                self, "Certificate", certificate_arn.value_as_string
-            )],
-        )
+        if with_domain:
+            listener = alb.add_listener(
+                "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
+                    self, "Certificate", certificate_arn.value_as_string
+                )],
+            )
+            alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
+                protocol="HTTPS", port="443", permanent=True
+            ))
+            route53.CfnRecordSet(
+                self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
+                name=domain_name.value_as_string, type="A",
+                alias_target=route53.CfnRecordSet.AliasTargetProperty(
+                    dns_name=alb.load_balancer_dns_name,
+                    hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
+                    evaluate_target_health=True,
+                ),
+            )
+        else:
+            listener = alb.add_listener("Http", port=80)
         listener.add_targets(
             "ApiTargets", port=8000,
             targets=[api_service.load_balancer_target(container_name="Api", container_port=8000)],
             health_check=elbv2.HealthCheck(path="/health"),
-        )
-        alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
-            protocol="HTTPS", port="443", permanent=True
-        ))
-        route53.CfnRecordSet(
-            self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
-            name=domain_name.value_as_string, type="A",
-            alias_target=route53.CfnRecordSet.AliasTargetProperty(
-                dns_name=alb.load_balancer_dns_name,
-                hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
-                evaluate_target_health=True,
-            ),
         )
         api_sg.add_ingress_rule(alb.connections.security_groups[0], ec2.Port.tcp(8000))
 
@@ -261,7 +268,8 @@ class AgentsPlatformStack(Stack):
             )
 
         CfnOutput(self, "LoadBalancerDns", value=alb.load_balancer_dns_name)
-        CfnOutput(self, "ApiDomain", value=domain_name.value_as_string)
+        if with_domain:
+            CfnOutput(self, "ApiDomain", value=domain_name.value_as_string)
         CfnOutput(self, "RepositoryUri", value=repository.repository_uri)
         CfnOutput(self, "ClusterArn", value=cluster.cluster_arn)
         CfnOutput(self, "MigrationTaskArn", value=migration_task.task_definition_arn)
@@ -275,10 +283,14 @@ class AgentsPlatformStack(Stack):
 
 app = App()
 environment = app.node.try_get_context("environment") or "staging"
+with_domain = bool(os.environ.get("API_DOMAIN"))
+if environment == "production" and not with_domain:
+    raise ValueError("Production requires API_DOMAIN, CERTIFICATE_ARN and HOSTED_ZONE_ID")
 AgentsPlatformStack(
     app,
     f"AgentsPlatform-{environment}",
     production=environment == "production",
+    with_domain=with_domain,
     env=Environment(
         account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
         region=os.environ.get("CDK_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1")),

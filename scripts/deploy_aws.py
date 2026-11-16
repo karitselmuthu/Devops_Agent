@@ -54,6 +54,15 @@ def main() -> int:
     require_environment("AWS_REGION")
     github_token = require_environment("AGENTS_GITHUB_TOKEN")
     openai_key = require_environment("AGENTS_OPENAI_API_KEY")
+    # Staging may run without a domain: plain HTTP on the load balancer's DNS name.
+    domain = os.environ.get("API_DOMAIN")
+    if environment == "production" and not domain:
+        raise ValueError("Missing deployment setting: API_DOMAIN")
+    domain_parameters = {
+        "CertificateArn": require_environment("CERTIFICATE_ARN"),
+        "DomainName": domain,
+        "HostedZoneId": require_environment("HOSTED_ZONE_ID"),
+    } if domain else {}
     stack_name = f"AgentsPlatform-{environment}"
     cloudformation = boto3.client("cloudformation")
     ecs = boto3.client("ecs")
@@ -62,9 +71,7 @@ def main() -> int:
         deploy_stack(
             stack_name, environment,
             {
-                "CertificateArn": require_environment("CERTIFICATE_ARN"),
-                "DomainName": require_environment("API_DOMAIN"),
-                "HostedZoneId": require_environment("HOSTED_ZONE_ID"),
+                **domain_parameters,
                 "AllowedRepositories": os.environ.get("ALLOWED_REPOSITORIES", ""),
                 "AllowedPipelines": os.environ.get("ALLOWED_PIPELINES", ""),
                 "AllowedStacks": os.environ.get("ALLOWED_STACKS", ""),
@@ -124,7 +131,12 @@ def main() -> int:
                 "OpenAIModel": require_environment("OPENAI_MODEL"),
             },
         )
-        url = f"https://{require_environment('API_DOMAIN')}/health"
+        if domain:
+            url = f"https://{domain}/health"
+        else:
+            stack = describe_stack(cloudformation, stack_name)
+            url = f"http://{output(stack, 'LoadBalancerDns')}/health"
+        print(f"Health check: {url}")
         for attempt in range(12):
             try:
                 if httpx.get(url, timeout=10).status_code == 200:

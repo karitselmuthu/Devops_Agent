@@ -108,6 +108,9 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
    `ALLOWED_REPOSITORIES`, `ALLOWED_PIPELINES`, and `ALLOWED_STACKS`. The three
    allowlists are comma-separated. Set environment secrets
    `AGENTS_GITHUB_TOKEN` and `AGENTS_OPENAI_API_KEY`.
+   Staging may omit `CERTIFICATE_ARN`, `API_DOMAIN`, and `HOSTED_ZONE_ID`: the
+   API is then served over plain HTTP on the load balancer's DNS name, for
+   testing only. Production requires all three.
 4. Create a GitHub OIDC-trusting AWS deployment role scoped to the repository's
    environment subject. It needs CloudFormation/CDK bootstrap deployment,
    ECR push, ECS task run and describe, Secrets Manager write for the two app
