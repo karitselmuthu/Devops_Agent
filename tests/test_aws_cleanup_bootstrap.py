@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from scripts import remove_staging_aws
+from scripts import aws_cleanup as remove_staging_aws
 sys.path.pop(0)
 
 
@@ -43,3 +43,16 @@ def test_bootstrap_assets_must_match_account_and_region() -> None:
     )
     with pytest.raises(ValueError, match="do not match"):
         remove_staging_aws.bootstrap_assets(client, "999999999999", "us-east-1")
+
+
+def test_live_stack_resource_ids_are_captured_before_deletion() -> None:
+    resources = [
+        {"ResourceType": "AWS::RDS::DBInstance", "PhysicalResourceId": "staging-db"},
+        {"ResourceType": "AWS::KMS::Key", "PhysicalResourceId": "queue-key"},
+    ]
+    client = SimpleNamespace(get_paginator=lambda name: SimpleNamespace(
+        paginate=lambda **kwargs: [{"StackResourceSummaries": resources}]
+    ))
+    assert remove_staging_aws.app_resource_ids(client, "AgentsPlatform-staging") == (
+        "staging-db", "queue-key",
+    )

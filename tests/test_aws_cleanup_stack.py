@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 
-teardown = run_path(str(Path(__file__).parents[1] / "scripts" / "teardown_aws.py"))
+teardown = run_path(str(Path(__file__).parents[1] / "scripts" / "aws_cleanup.py"))
 
 
 def test_plan_mode_never_contacts_aws(monkeypatch, capsys) -> None:

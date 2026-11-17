@@ -7,7 +7,7 @@ import pytest
 
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from scripts import cleanup_staging_leftovers as cleanup
+from scripts import aws_cleanup as cleanup
 sys.path.pop(0)
 
 
@@ -38,7 +38,7 @@ def test_plan_mode_never_contacts_aws(tmp_path, monkeypatch, capsys) -> None:
     path = tmp_path / "report.json"
     report(path)
     monkeypatch.setattr(sys, "argv", [
-        "cleanup_staging_leftovers", "--region", "us-east-1",
+        "aws_cleanup", "--mode", "leftovers", "--region", "us-east-1",
         "--account-id", "123456789012", "--report", str(path),
     ])
     monkeypatch.setattr(cleanup, "aws_session", lambda region: pytest.fail("AWS contacted"))
@@ -50,7 +50,7 @@ def test_check_mode_is_read_only(tmp_path, monkeypatch) -> None:
     path = tmp_path / "report.json"
     report(path)
     monkeypatch.setattr(sys, "argv", [
-        "cleanup_staging_leftovers", "--region", "us-east-1",
+        "aws_cleanup", "--mode", "leftovers", "--region", "us-east-1",
         "--account-id", "123456789012", "--report", str(path), "--check",
     ])
     calls = []
