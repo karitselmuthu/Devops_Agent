@@ -108,9 +108,8 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
    `ALLOWED_REPOSITORIES`, `ALLOWED_PIPELINES`, and `ALLOWED_STACKS`. The three
    allowlists are comma-separated. Set environment secrets
    `AGENTS_GITHUB_TOKEN` and `AGENTS_OPENAI_API_KEY`.
-   Staging may omit `CERTIFICATE_ARN`, `API_DOMAIN`, and `HOSTED_ZONE_ID`: the
-   API is then served over plain HTTP on the load balancer's DNS name, for
-   testing only. Production requires all three.
+   Both staging and production require these domain and certificate values so
+   the public API is served over HTTPS.
 4. Create a GitHub OIDC-trusting AWS deployment role scoped to the repository's
    environment subject. It needs CloudFormation/CDK bootstrap deployment,
    ECR push, ECS task run and describe, Secrets Manager write for the two app
@@ -127,10 +126,73 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
    workflow for production. Confirm ECS service stability, SQS dead-letter
    counts, and an authenticated workflow before accepting the release.
 
+The release starts one API task in staging and two in production. Dispatcher,
+result consumer, and five agent services each start one task. To pause background
+work in staging, set its GitHub environment variable
+`BACKGROUND_DESIRED_COUNT=0` and redeploy. Workflows will queue but will not
+advance until you set it back to `1` and redeploy. Production requires `1`.
+
 The deployment script is `scripts/deploy_aws.py`. It restores the previous image
 and desired count when the post-deploy health check fails. Database migrations
 must be backward compatible because an image rollback does not reverse schema
 changes.
+
+### Complete AWS teardown
+
+`scripts/teardown_aws.py` is prepared for later use; it does not run during
+deployment. Its default mode only prints the plan and makes no AWS calls:
+
+```bash
+.venv/bin/python scripts/teardown_aws.py --environment staging --region us-east-1 --account-id 123456789012
+```
+
+When you intend to delete an environment, add `--execute`. The script checks
+the AWS account and stack, shows a CDK diff, then requires an exact typed
+confirmation. It first updates the stack with zero ECS tasks and deletion
+policies for RDS, ECR images, Cognito, secrets, KMS, and logs. It disables
+production termination protection, runs `cdk destroy`, and checks for retained
+CloudFormation resources. This deletes application data, users, tokens, images,
+and queues. Run it separately for staging and production. Use credentials with
+CloudFormation, CDK deploy/destroy, and termination-protection permissions; the
+GitHub deployment role may need additional delete permissions.
+
+The CDK bootstrap stack and any manually created RDS snapshots are outside this
+application stack and are not deleted by this script. AWS may place KMS keys
+and secrets in a pending-deletion period before final removal. Verify the
+CloudFormation stack and remaining resources after the command finishes.
+
+To remove **staging and its `CDKToolkit` bootstrap stack together**, use the
+separate command below. It also prints a plan by default and makes no AWS calls:
+
+```bash
+.venv/bin/python -m scripts.remove_staging_aws --region us-east-1 --account-id 123456789012
+```
+
+Add `--execute` only when ready to delete. It refuses to remove `CDKToolkit` if
+any other active CloudFormation stack exists in that account and Region. After
+the staging teardown, it empties the bootstrap S3 bucket and ECR repository,
+deletes `CDKToolkit`, and removes any asset bucket or repository retained by
+CloudFormation. It requires two typed confirmations. Do not run it if other
+applications outside CloudFormation use the same bootstrap assets. It does not
+delete manually created RDS snapshots or resources outside these two stacks.
+
+If a stack was already deleted with `DELETE_SKIPPED` resources, use the
+post-deletion cleanup command instead. It reads the CloudFormation event report,
+checks the matching AWS account and Region, and prints a plan without AWS calls.
+The event report is kept locally and is not committed; pass `--report PATH` if
+it is stored outside the project directory:
+
+```bash
+.venv/bin/python -m scripts.cleanup_staging_leftovers --region us-east-1 --account-id 123456789012
+```
+
+Use `--check` to inventory live AWS resources without changing them. With
+`--execute`, it inventories the old database's manual snapshots and
+retained automated backups, the CDK asset bucket, the staging GitHub deployment
+role and OIDC provider, and the queue KMS key. It refuses cleanup while active
+CloudFormation stacks exist or another role trusts the provider. It displays
+the exact targets and requires a typed confirmation before deletion. KMS keys
+already pending deletion remain on AWS's deletion schedule.
 
 The Cognito pool creates `agents-readers`, `agents-operators`, and
 `agents-admins` groups. Create users and assign groups before invoking the API.
