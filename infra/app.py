@@ -33,20 +33,19 @@ AGENTS = ("CODE", "SECURITY", "DEVOPS", "INFRA", "MONITORING")
 
 class AgentsPlatformStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, *, production: bool,
-                 with_domain: bool, **kwargs) -> None:
+                 teardown: bool = False, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
-        if production:
+        if production and not teardown:
             self.termination_protection = True
+        persistent_policy = RemovalPolicy.DESTROY if teardown else RemovalPolicy.RETAIN
 
-        # Without a domain (staging only) the API is served over plain HTTP on the
-        # load balancer's own DNS name, so no certificate or DNS record is needed.
-        if with_domain:
-            certificate_arn = CfnParameter(self, "CertificateArn", type="String")
-            domain_name = CfnParameter(self, "DomainName", type="String")
-            hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
+        certificate_arn = CfnParameter(self, "CertificateArn", type="String")
+        domain_name = CfnParameter(self, "DomainName", type="String")
+        hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
         image_tag = CfnParameter(self, "ImageTag", type="String", default="bootstrap")
         migration_image_tag = CfnParameter(self, "MigrationImageTag", type="String", default="bootstrap")
-        desired_count = CfnParameter(self, "DesiredCount", type="Number", default=0)
+        api_desired_count = CfnParameter(self, "ApiDesiredCount", type="Number", default=0)
+        background_desired_count = CfnParameter(self, "BackgroundDesiredCount", type="Number", default=0)
         allowed_repos = CfnParameter(self, "AllowedRepositories", type="String", default="")
         allowed_pipelines = CfnParameter(self, "AllowedPipelines", type="String", default="")
         allowed_stacks = CfnParameter(self, "AllowedStacks", type="String", default="")
@@ -76,11 +75,14 @@ class AgentsPlatformStack(Stack):
             storage_encrypted=True,
             multi_az=production,
             backup_retention=Duration.days(7),
-            deletion_protection=production,
-            removal_policy=RemovalPolicy.RETAIN,
+            deletion_protection=production and not teardown,
+            removal_policy=persistent_policy,
         )
+        if database.secret:
+            database.secret.apply_removal_policy(persistent_policy)
 
-        queue_key = kms.Key(self, "QueueKey", enable_key_rotation=True)
+        queue_key = kms.Key(self, "QueueKey", enable_key_rotation=True,
+                            removal_policy=persistent_policy)
         dead_letter_queue = sqs.Queue(
             self, "DeadLetterQueue", fifo=True, encryption=sqs.QueueEncryption.KMS,
             encryption_master_key=queue_key, retention_period=Duration.days(14),
@@ -95,14 +97,18 @@ class AgentsPlatformStack(Stack):
             for name in (*AGENTS, "RESULTS")
         }
 
-        repository = ecr.Repository(self, "Repository", removal_policy=RemovalPolicy.RETAIN)
+        repository = ecr.Repository(
+            self, "Repository", removal_policy=persistent_policy,
+            empty_on_delete=teardown,
+        )
         image = ecs.ContainerImage.from_ecr_repository(repository, image_tag.value_as_string)
         migration_image = ecs.ContainerImage.from_ecr_repository(
             repository, migration_image_tag.value_as_string
         )
-        github_secret = secretsmanager.Secret(self, "GitHubToken")
-        openai_secret = secretsmanager.Secret(self, "OpenAIKey")
-        pool = cognito.UserPool(self, "UserPool", self_sign_up_enabled=False)
+        github_secret = secretsmanager.Secret(self, "GitHubToken", removal_policy=persistent_policy)
+        openai_secret = secretsmanager.Secret(self, "OpenAIKey", removal_policy=persistent_policy)
+        pool = cognito.UserPool(self, "UserPool", self_sign_up_enabled=False,
+                                removal_policy=persistent_policy)
         app_client = pool.add_client(
             "ApiClient",
             generate_secret=False,
@@ -128,13 +134,18 @@ class AgentsPlatformStack(Stack):
         db_secret = {"DB_PASSWORD": ecs.Secret.from_secrets_manager(database.secret, "password")}
         image_log = logs.LogGroup(
             self, "ApplicationLogs", retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=persistent_policy,
         )
 
         def task_definition(role: str, command: list[str] | None = None,
                             extra_env: dict[str, str] | None = None,
                             extra_secrets: dict[str, ecs.Secret] | None = None) -> ecs.FargateTaskDefinition:
-            task = ecs.FargateTaskDefinition(self, f"{role}Task", cpu=512, memory_limit_mib=1024)
+            large_task = role in {"Api", "CodeWorker", "SecurityWorker"}
+            task = ecs.FargateTaskDefinition(
+                self, f"{role}Task",
+                cpu=512 if large_task else 256,
+                memory_limit_mib=1024 if large_task else 512,
+            )
             task.add_volume(name="scratch")
             container = task.add_container(
                 role,
@@ -182,31 +193,29 @@ class AgentsPlatformStack(Stack):
         )
         api_service = ecs.FargateService(
             self, "ApiService", cluster=cluster, task_definition=api_task,
-            desired_count=desired_count.value_as_number,
+            desired_count=api_desired_count.value_as_number,
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[api_sg],
         )
         alb = elbv2.ApplicationLoadBalancer(self, "LoadBalancer", vpc=vpc, internet_facing=True)
-        if with_domain:
-            listener = alb.add_listener(
-                "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
-                    self, "Certificate", certificate_arn.value_as_string
-                )],
-            )
-            alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
-                protocol="HTTPS", port="443", permanent=True
-            ))
-            route53.CfnRecordSet(
-                self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
-                name=domain_name.value_as_string, type="A",
-                alias_target=route53.CfnRecordSet.AliasTargetProperty(
-                    dns_name=alb.load_balancer_dns_name,
-                    hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
-                    evaluate_target_health=True,
-                ),
-            )
-        else:
-            listener = alb.add_listener("Http", port=80)
+        listener = alb.add_listener(
+            "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
+                self, "Certificate", certificate_arn.value_as_string
+            )],
+        )
+        alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
+            protocol="HTTPS", port="443", permanent=True
+        ))
+        route53.CfnRecordSet(
+            self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
+            name=domain_name.value_as_string, type="A",
+            alias_target=route53.CfnRecordSet.AliasTargetProperty(
+                dns_name=alb.load_balancer_dns_name,
+                hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
+                evaluate_target_health=True,
+            ),
+        )
         listener.add_targets(
             "ApiTargets", port=8000,
             targets=[api_service.load_balancer_target(container_name="Api", container_port=8000)],
@@ -219,14 +228,16 @@ class AgentsPlatformStack(Stack):
             queues[name].grant_send_messages(dispatcher_task.task_role)
         ecs.FargateService(
             self, "DispatcherService", cluster=cluster, task_definition=dispatcher_task,
-            desired_count=desired_count.value_as_number, security_groups=[worker_sg],
+            desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
 
         result_task = task_definition("Results", ["python", "-m", "agents_platform.runtime", "results"])
         queues["RESULTS"].grant_consume_messages(result_task.task_role)
         ecs.FargateService(
             self, "ResultsService", cluster=cluster, task_definition=result_task,
-            desired_count=desired_count.value_as_number, security_groups=[worker_sg],
+            desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
 
         for name in AGENTS:
@@ -264,12 +275,12 @@ class AgentsPlatformStack(Stack):
                 ))
             ecs.FargateService(
                 self, f"{name.title()}Service", cluster=cluster, task_definition=task,
-                desired_count=desired_count.value_as_number, security_groups=[worker_sg],
+                desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
+                circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
             )
 
         CfnOutput(self, "LoadBalancerDns", value=alb.load_balancer_dns_name)
-        if with_domain:
-            CfnOutput(self, "ApiDomain", value=domain_name.value_as_string)
+        CfnOutput(self, "ApiDomain", value=domain_name.value_as_string)
         CfnOutput(self, "RepositoryUri", value=repository.repository_uri)
         CfnOutput(self, "ClusterArn", value=cluster.cluster_arn)
         CfnOutput(self, "MigrationTaskArn", value=migration_task.task_definition_arn)
@@ -283,14 +294,12 @@ class AgentsPlatformStack(Stack):
 
 app = App()
 environment = app.node.try_get_context("environment") or "staging"
-with_domain = bool(os.environ.get("API_DOMAIN"))
-if environment == "production" and not with_domain:
-    raise ValueError("Production requires API_DOMAIN, CERTIFICATE_ARN and HOSTED_ZONE_ID")
+teardown = str(app.node.try_get_context("teardown")).lower() == "true"
 AgentsPlatformStack(
     app,
     f"AgentsPlatform-{environment}",
     production=environment == "production",
-    with_domain=with_domain,
+    teardown=teardown,
     env=Environment(
         account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
         region=os.environ.get("CDK_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-east-1")),
