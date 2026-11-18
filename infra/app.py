@@ -24,6 +24,8 @@ from aws_cdk import (
     aws_route53 as route53,
     aws_secretsmanager as secretsmanager,
     aws_sqs as sqs,
+    aws_s3 as s3,
+    aws_codebuild as codebuild,
 )
 from constructs import Construct
 
@@ -96,6 +98,60 @@ class AgentsPlatformStack(Stack):
             )
             for name in (*AGENTS, "RESULTS")
         }
+        app_queue = sqs.Queue(
+            self, "AppDeployQueue", fifo=True,
+            encryption=sqs.QueueEncryption.KMS, encryption_master_key=queue_key,
+            visibility_timeout=Duration.seconds(120),
+            dead_letter_queue=sqs.DeadLetterQueue(queue=dead_letter_queue, max_receive_count=5),
+        )
+
+        app_source_bucket = s3.Bucket(
+            self, "AppSourceBucket", block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            lifecycle_rules=[s3.LifecycleRule(expiration=Duration.days(1))],
+            removal_policy=persistent_policy,
+            auto_delete_objects=teardown,
+        )
+        app_build = codebuild.Project(
+            self, "AppContainerBuild",
+            source=codebuild.Source.s3(
+                bucket=app_source_bucket, path="app-sources/placeholder.zip"
+            ),
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                compute_type=codebuild.ComputeType.SMALL,
+                privileged=True,
+            ),
+            build_spec=codebuild.BuildSpec.from_object({
+                "version": "0.2",
+                "phases": {
+                    "pre_build": {"commands": [
+                        'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "${IMAGE_URI%%/*}"',
+                    ]},
+                    "build": {"commands": ['docker build --pull -t "$IMAGE_URI" .']},
+                    "post_build": {"commands": ['docker push "$IMAGE_URI"']},
+                },
+            }),
+            timeout=Duration.minutes(30),
+        )
+        app_source_bucket.grant_read(app_build.role)
+        app_build.role.add_to_policy(iam.PolicyStatement(
+            actions=["ecr:GetAuthorizationToken"], resources=["*"],
+        ))
+        app_build.role.add_to_policy(iam.PolicyStatement(
+            actions=["ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload",
+                     "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage",
+                     "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+            resources=[f"arn:{self.partition}:ecr:{self.region}:{self.account}:repository/agents-app-*"],
+        ))
+        app_runner_access_role = iam.Role(
+            self, "AppRunnerEcrAccessRole",
+            assumed_by=iam.ServicePrincipal("build.apprunner.amazonaws.com"),
+            managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSAppRunnerServicePolicyForECRAccess"
+            )],
+        )
 
         repository = ecr.Repository(
             self, "Repository", removal_policy=persistent_policy,
@@ -113,6 +169,18 @@ class AgentsPlatformStack(Stack):
             "ApiClient",
             generate_secret=False,
             auth_flows=cognito.AuthFlow(user_password=True, user_srp=True),
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(authorization_code_grant=True),
+                scopes=[cognito.OAuthScope.OPENID],
+                callback_urls=[f"https://{domain_name.value_as_string}/"],
+                logout_urls=[f"https://{domain_name.value_as_string}/"],
+            ),
+        )
+        login_domain = pool.add_domain(
+            "LoginDomain",
+            cognito_domain=cognito.CognitoDomainOptions(
+                domain_prefix=f"agents-{construct_id.lower()}-{self.account}-{self.region}"
+            ),
         )
         for group in ("agents-readers", "agents-operators", "agents-admins"):
             cognito.CfnUserPoolGroup(self, group.replace("-", "").title(),
@@ -121,6 +189,7 @@ class AgentsPlatformStack(Stack):
         cluster = ecs.Cluster(self, "Cluster", vpc=vpc)
         common_env = {
             "AGENTS_MODE": "aws",
+            "AGENTS_ENVIRONMENT": construct_id.removeprefix("AgentsPlatform-"),
             "AWS_REGION": self.region,
             "DB_HOST": database.db_instance_endpoint_address,
             "DB_PORT": database.db_instance_endpoint_port,
@@ -130,6 +199,7 @@ class AgentsPlatformStack(Stack):
             "AGENTS_ALLOWED_PIPELINES": allowed_pipelines.value_as_string,
             "AGENTS_ALLOWED_STACKS": allowed_stacks.value_as_string,
             **{f"SQS_{name}_URL": queue.queue_url for name, queue in queues.items()},
+            "SQS_APP_DEPLOY_URL": app_queue.queue_url,
         }
         db_secret = {"DB_PASSWORD": ecs.Secret.from_secrets_manager(database.secret, "password")}
         image_log = logs.LogGroup(
@@ -163,6 +233,7 @@ class AgentsPlatformStack(Stack):
                 container.add_port_mappings(ecs.PortMapping(container_port=8000))
                 container.add_environment("COGNITO_USER_POOL_ID", pool.user_pool_id)
                 container.add_environment("COGNITO_APP_CLIENT_ID", app_client.user_pool_client_id)
+                container.add_environment("COGNITO_DOMAIN", login_domain.base_url())
             return task
 
         api_task = task_definition(
@@ -226,6 +297,7 @@ class AgentsPlatformStack(Stack):
         dispatcher_task = task_definition("Dispatcher", ["python", "-m", "agents_platform.runtime", "dispatcher"])
         for name in AGENTS:
             queues[name].grant_send_messages(dispatcher_task.task_role)
+        app_queue.grant_send_messages(dispatcher_task.task_role)
         ecs.FargateService(
             self, "DispatcherService", cluster=cluster, task_definition=dispatcher_task,
             desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
@@ -236,6 +308,55 @@ class AgentsPlatformStack(Stack):
         queues["RESULTS"].grant_consume_messages(result_task.task_role)
         ecs.FargateService(
             self, "ResultsService", cluster=cluster, task_definition=result_task,
+            desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+        )
+
+        app_worker_task = task_definition(
+            "AppDeployWorker", ["python", "-m", "agents_platform.app_runtime"],
+            extra_env={
+                "APP_SOURCE_BUCKET": app_source_bucket.bucket_name,
+                "APP_CODEBUILD_PROJECT": app_build.project_name,
+                "APP_RUNNER_ACCESS_ROLE_ARN": app_runner_access_role.role_arn,
+            },
+            extra_secrets={"GITHUB_TOKEN": ecs.Secret.from_secrets_manager(github_secret)},
+        )
+        app_queue.grant_consume_messages(app_worker_task.task_role)
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:PutObject", "s3:DeleteObject"],
+            resources=[app_source_bucket.arn_for_objects("app-sources/*")],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+            resources=[app_build.project_arn],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository",
+                     "ecr:TagResource"],
+            resources=[f"arn:{self.partition}:ecr:{self.region}:{self.account}:repository/agents-app-*"],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["cloudformation:CreateChangeSet", "cloudformation:DescribeChangeSet",
+                     "cloudformation:ExecuteChangeSet", "cloudformation:DescribeStacks",
+                     "cloudformation:DeleteStack"],
+            resources=[
+                f"arn:{self.partition}:cloudformation:{self.region}:{self.account}:stack/AgentsApp-*/*",
+                f"arn:{self.partition}:cloudformation:{self.region}:{self.account}:changeSet/agents-app-*/*",
+            ],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["apprunner:CreateService", "apprunner:DescribeService", "apprunner:DeleteService"],
+            resources=["*"],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"], resources=[app_runner_access_role.role_arn],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:CreateServiceLinkedRole"], resources=["*"],
+            conditions={"StringEquals": {"iam:AWSServiceName": "apprunner.amazonaws.com"}},
+        ))
+        ecs.FargateService(
+            self, "AppDeployService", cluster=cluster, task_definition=app_worker_task,
             desired_count=background_desired_count.value_as_number, security_groups=[worker_sg],
             circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
@@ -288,8 +409,12 @@ class AgentsPlatformStack(Stack):
         CfnOutput(self, "WorkerSecurityGroupId", value=worker_sg.security_group_id)
         CfnOutput(self, "UserPoolId", value=pool.user_pool_id)
         CfnOutput(self, "UserPoolClientId", value=app_client.user_pool_client_id)
+        CfnOutput(self, "CognitoLoginUrl", value=login_domain.base_url())
         CfnOutput(self, "GitHubTokenSecretArn", value=github_secret.secret_arn)
         CfnOutput(self, "OpenAIKeySecretArn", value=openai_secret.secret_arn)
+        CfnOutput(self, "AppSourceBucketName", value=app_source_bucket.bucket_name)
+        CfnOutput(self, "AppCodeBuildProjectName", value=app_build.project_name)
+        CfnOutput(self, "AppRunnerAccessRoleArn", value=app_runner_access_role.role_arn)
 
 
 app = App()

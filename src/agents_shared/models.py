@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from agents_shared.results import MAX_RESULT_LENGTH
+
 
 class AgentKind(StrEnum):
     CODE = "CODE"
@@ -130,4 +132,4 @@ class TaskResultMessage(BaseModel):
     workflow_id: UUID
     task_id: UUID
     status: TaskStatus
-    output: str = Field(max_length=10000)
+    output: str = Field(max_length=MAX_RESULT_LENGTH)

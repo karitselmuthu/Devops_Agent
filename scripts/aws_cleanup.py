@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError, MissingDependencyException
 STACK_NAME = "AgentsPlatform-staging"
 ROLE_NAME = "DevopsAgentGitHubStaging"
 BOOTSTRAP_STACK = "CDKToolkit"
+APP_STACK_PREFIX = "AgentsApp-"
 DEFAULT_REPORT = Path("AgentsPlatform-staging-deletion-report.json")
 
 
@@ -65,6 +66,49 @@ def active_stacks(cloudformation: object) -> set[str]:
         for stack in page["StackSummaries"]
         if stack["StackStatus"] != "DELETE_COMPLETE"
     }
+
+
+def managed_app_stacks(cloudformation: object, environment: str) -> list[tuple[str, str]]:
+    """Return only application stacks tagged by this platform."""
+    prefix = f"{APP_STACK_PREFIX}{environment}-"
+    found = []
+    for name in sorted(active_stacks(cloudformation)):
+        if not name.startswith(prefix):
+            continue
+        stack = cloudformation.describe_stacks(StackName=name)["Stacks"][0]
+        tags = {tag["Key"]: tag["Value"] for tag in stack.get("Tags", [])}
+        suffix = name.removeprefix(prefix)
+        if tags.get("ManagedBy") != "AgentsPlatform" or len(suffix) != 12 or any(
+            char not in "0123456789abcdef" for char in suffix
+        ):
+            raise ValueError(f"Application stack {name} lacks the expected ownership tags or name")
+        found.append((name, f"agents-app-{environment}-{suffix}"))
+    return found
+
+
+def delete_managed_apps(cloudformation: object, ecr: object, environment: str) -> None:
+    for stack_name, repository in managed_app_stacks(cloudformation, environment):
+        print(f"Deleting application stack {stack_name} and ECR repository {repository}")
+        cloudformation.delete_stack(StackName=stack_name)
+        cloudformation.get_waiter("stack_delete_complete").wait(StackName=stack_name)
+    prefix = f"agents-app-{environment}-"
+    for page in ecr.get_paginator("describe_repositories").paginate():
+        for item in page["repositories"]:
+            repository = item["repositoryName"]
+            if not repository.startswith(prefix):
+                continue
+            tags = {tag["Key"]: tag["Value"] for tag in
+                    ecr.list_tags_for_resource(resourceArn=item["repositoryArn"]).get("tags", [])}
+            suffix = repository.removeprefix(prefix)
+            if tags.get("ManagedBy") != "AgentsPlatform" or len(suffix) != 12 or any(
+                char not in "0123456789abcdef" for char in suffix
+            ):
+                raise ValueError(f"Application repository {repository} lacks the expected ownership tags or name")
+            print(f"Deleting application ECR repository {repository}")
+            try:
+                ecr.delete_repository(repositoryName=repository, force=True)
+            except ecr.exceptions.RepositoryNotFoundException:
+                pass
 
 
 def require_exclusive_bootstrap(cloudformation: object) -> set[str]:
@@ -189,6 +233,7 @@ def teardown_stack(environment: str, region: str, account_id: str, session: boto
     phrase = f"DELETE {stack_name} {account_id} {region}"
     if input(f"Type '{phrase}' to delete this stack and its data: ").strip() != phrase:
         raise ValueError("Teardown cancelled: confirmation did not match")
+    delete_managed_apps(cloudformation, session.client("ecr"), environment)
     subprocess.run(
         cdk_command("deploy", stack_name, environment)
         + ["--require-approval", "never", *parameters],
@@ -213,7 +258,13 @@ def teardown_stack(environment: str, region: str, account_id: str, session: boto
 
 def remove_staging_and_bootstrap(region: str, account_id: str, session: boto3.Session) -> None:
     cloudformation = session.client("cloudformation")
-    names = require_exclusive_bootstrap(cloudformation)
+    names = active_stacks(cloudformation)
+    app_names = {name for name, _ in managed_app_stacks(cloudformation, "staging")}
+    other = names - {STACK_NAME, BOOTSTRAP_STACK} - app_names
+    if other:
+        raise ValueError("Other active stacks exist: " + ", ".join(sorted(other)))
+    if BOOTSTRAP_STACK not in names:
+        raise ValueError("CDKToolkit stack was not found")
     _, bucket, repository = bootstrap_assets(cloudformation, account_id, region)
     print(f"Staging stack: {STACK_NAME if STACK_NAME in names else 'already absent'}")
     print(f"CDK bootstrap: {BOOTSTRAP_STACK}; S3: {bucket}; ECR: {repository}")
@@ -222,6 +273,8 @@ def remove_staging_and_bootstrap(region: str, account_id: str, session: boto3.Se
         raise ValueError("Cleanup cancelled: confirmation did not match")
     if STACK_NAME in names:
         teardown_stack("staging", region, account_id, session)
+    else:
+        delete_managed_apps(cloudformation, session.client("ecr"), "staging")
     require_exclusive_bootstrap(cloudformation)
     delete_bootstrap(session, account_id, region)
 
@@ -406,8 +459,10 @@ def main() -> int:
         cloudformation = session.client("cloudformation")
         names = active_stacks(cloudformation)
         stack_name = f"AgentsPlatform-{args.environment}"
+        app_names = {name for name, _ in managed_app_stacks(cloudformation, args.environment)}
         if args.check:
             print(f"Application stack: {'present' if stack_name in names else 'absent'}")
+            print(f"Managed application stacks: {', '.join(sorted(app_names)) or 'absent'}")
             if args.mode == "all":
                 print(f"CDK bootstrap: {'present' if BOOTSTRAP_STACK in names else 'absent'}")
                 if not names and args.report.exists():
@@ -422,8 +477,9 @@ def main() -> int:
                 teardown_stack(args.environment, args.region, args.account_id, session)
             else:
                 print(f"{stack_name} is already absent.")
+                delete_managed_apps(cloudformation, session.client("ecr"), args.environment)
             return 0
-        other_stacks = names - {STACK_NAME, BOOTSTRAP_STACK}
+        other_stacks = names - {STACK_NAME, BOOTSTRAP_STACK} - app_names
         if other_stacks:
             raise ValueError("CDK bootstrap may be shared; other active stacks exist: "
                              + ", ".join(sorted(other_stacks)))

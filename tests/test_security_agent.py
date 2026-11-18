@@ -2,7 +2,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from agents.security_agent import SecurityAgent
+import pytest
+
+from agents.security_agent import SecurityAgent, SecurityFindingsError
 from agents_platform.worker import run_once
 from agents_shared.messaging import InMemoryTaskBroker
 from agents_shared.models import (
@@ -23,6 +25,23 @@ def test_clean_scan_returns_structured_report(tmp_path: Path) -> None:
     agent._run = fake_run
     output = json.loads(agent.execute(WorkflowTask(agent=AgentKind.SECURITY, instruction="scan")))
     assert output == {"outcome": "clean", "findings": [], "scanners": ["bandit", "trivy"]}
+
+
+def test_bandit_report_uses_repository_relative_paths(tmp_path: Path) -> None:
+    file = tmp_path / "app.py"
+    file.write_text("print('ready')\n")
+    agent = SecurityAgent(tmp_path, scanners=("bandit",))
+    agent._run = lambda command: subprocess.CompletedProcess(
+        command, 1,
+        json.dumps({"results": [{
+            "filename": str(file), "test_id": "B104", "line_number": 1,
+            "issue_severity": "MEDIUM", "issue_text": "Possible binding to all interfaces.",
+        }]}), "",
+    )
+    with pytest.raises(SecurityFindingsError) as error:
+        agent.execute(WorkflowTask(agent=AgentKind.SECURITY, instruction="scan"))
+    report = json.loads(str(error.value))
+    assert report["findings"][0]["file"] == "app.py"
 
 
 def test_findings_fail_worker_without_exposing_secret(tmp_path: Path) -> None:

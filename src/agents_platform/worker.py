@@ -3,6 +3,7 @@ from threading import Event
 
 from agents_shared.messaging import TaskBroker
 from agents_shared.models import AgentKind, TaskResultMessage, TaskStatus, WorkflowTask
+from agents_shared.results import bounded_result_output
 
 
 def run_once(
@@ -23,7 +24,7 @@ def run_once(
             workflow_id=message.workflow_id,
             task_id=message.task.id,
             status=status,
-            output=output,
+            output=bounded_result_output(output),
         )
     )
     return True

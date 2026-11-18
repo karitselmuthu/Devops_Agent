@@ -7,7 +7,8 @@ Local mode uses an in-memory store and broker for development.
 
 ## Project status
 
-The application and AWS deployment templates are implemented and tested locally.
+The application, AWS deployment templates, and a first web portal for source checks
+are implemented and tested locally.
 An AWS environment has not yet been deployed. The Code Agent produces reviewable
 patches; it does not publish changes. The integration hub exposes HTTP tools and
 does not implement the MCP wire protocol.
@@ -59,22 +60,135 @@ diff with `git apply --check`.
 
 ## Local development
 
-```bash
-uv sync --locked --extra test --extra code-agent --extra security-agent
-uv run python main.py
-uv run --no-sync pytest -q
-```
+Run these commands from the repository directory on the **same Mac** where you
+will open the browser. AWS credentials, Docker, PostgreSQL, and SQS are not needed
+to view the local portal.
 
-Browse `http://127.0.0.1:8000/docs`. The API runs in local mode unless
-`AGENTS_MODE=aws`; local workflows need the in-process worker loop to advance.
-Local mode has no authentication and must stay on a developer machine.
+1. Open **Terminal 1** and install the locked Python dependencies:
+
+   ```bash
+   cd /Users/karthikeyan/PycharmProjects/DevOps_Agent
+   uv sync --locked --extra test --extra code-agent --extra security-agent
+   ```
+
+2. Start the server in **Terminal 1** and leave that terminal open:
+
+   ```bash
+   unset AGENTS_MODE
+   uv run --no-sync python main.py
+   ```
+
+   Wait for `Uvicorn running on http://127.0.0.1:8000`. If an older server is
+   running in another terminal, stop it with `Ctrl+C` before starting this one.
+   Closing Terminal 1 or pressing `Ctrl+C` stops the site.
+
+3. Open **Terminal 2** and confirm the server responds:
+
+   ```bash
+   curl http://127.0.0.1:8000/health
+   ```
+
+   Expected output: `{"status":"ok"}`. Then open the **web portal** at
+   <http://127.0.0.1:8000/>. Swagger remains available at
+   <http://127.0.0.1:8000/docs>.
+
+4. Install the two system scanners before running a source check on macOS:
+
+   ```bash
+   brew install trivy gitleaks
+   trivy --version
+   gitleaks version
+   ```
+
+   `uv sync` installs Bandit through the `security-agent` extra. Restart Terminal 1
+   after installation if its running server does not see the new commands. Create
+   a new workflow after installing scanners; an already failed task is not retried.
+
+5. In the portal, enter a real GitHub repository URL, its **existing** branch, an application
+   name, and an environment. Select **Review plan**, then **Start source check**.
+   The status page refreshes automatically. Local mode starts an in-process worker;
+   the task should leave `QUEUED` and finish as `COMPLETED` or `FAILED` with output.
+   Use a repository you can access; `acme/billing` in the API example is a placeholder.
+   Branch names vary by repository: some use `main`, others use `master`.
+
+6. Run the automated tests in **Terminal 2** if you also want to verify the
+   application code:
+
+   ```bash
+   uv run --no-sync pytest -q
+   ```
+
+### If the local site cannot be reached
+
+- Check that Terminal 1 still shows the Uvicorn process and its `127.0.0.1:8000`
+  address. Start it again if it stopped or printed an error.
+- Run `lsof -nP -iTCP:8000 -sTCP:LISTEN`. If nothing is listed, no server is
+  listening on port 8000. If another process owns the port, stop that process in
+  its terminal and restart `main.py`.
+- Use `http://127.0.0.1:8000/` exactly, including `http` rather than `https`.
+  `127.0.0.1` works only on the Mac running the server.
+- If `/health` works but `/` returns an error, restart the server so it loads
+  the latest portal code, then check Terminal 1 for the traceback.
+- If cloning fails, confirm the repository URL and branch on GitHub. For a public
+  repository, `git ls-remote https://github.com/OWNER/REPO.git HEAD refs/heads/BRANCH`
+  should list the branch. For a private repository, configure `GITHUB_TOKEN`.
+
+The local security worker requires `git`, `bandit`, `trivy`, and `gitleaks` to
+perform a real source check. The Docker image includes the scanners. If a scanner
+is missing locally, the workflow reports `FAILED` with `Scanner unavailable` in
+its output. A `FAILED` result containing a JSON report with `"outcome":"blocked"`
+means the scanners ran and found issues to review. Local workflow state is lost
+when the API restarts. Local mode has no authentication and must stay on a
+developer machine.
+
+### Web portal scope
+
+The portal has two flows. The source check accepts a GitHub URL, branch,
+application name, and environment, then displays scanner results. The application
+deployment flow accepts the same GitHub source plus an HTTP port. It requires a
+root `Dockerfile`, pins the reviewed commit, and displays an ECR repository,
+CodeBuild job, and App Runner service as its resource plan. It flags resources
+that bill while running; it does not calculate an AWS price estimate. An
+administrator approves the plan before any build or AWS resource creation.
+The background worker archives the pinned commit, builds and pushes its image to
+ECR, then creates an App Runner service through a CloudFormation change set.
+The portal shows build/deployment status, the HTTPS URL, and a Delete action.
+Deletion removes the application stack, ECR repository, and temporary source
+archive. Build and deployment failures are shown in the plan status.
+
+In AWS mode, the portal uses the Cognito managed login authorization code flow
+with PKCE. Operators can create plans; readers can view plans and status;
+administrators can approve and delete. Only GitHub repositories in
+`ALLOWED_REPOSITORIES` are accepted. Use repositories whose Dockerfile builds a
+web server that listens on the supplied port. This blueprint does not provision
+application databases, secrets, domains, or custom network access. Review a
+repository before allowlisting it: its Dockerfile runs in the shared CodeBuild
+project with permissions to push platform-managed application images. Source
+checks are separate from deployment approval, so review their results before
+approving a plan. In local mode you can preview a plan; approval and AWS actions
+require the deployed AWS platform.
+
+To try the new flow locally, start the API as described above, open the portal,
+and enter a real GitHub repository with a root `Dockerfile`, its branch, an app
+name, and its HTTP port under **Application deployment**. Select **Create resource
+plan** and verify the commit, stack name, ECR repository, App Runner service,
+and billable steps. The **Approve and deploy** button appears only on the AWS
+platform. There, sign in as an `agents-admins` user, approve the plan, refresh
+until the status is `RUNNING`, and open the HTTPS URL. Select **Delete app
+resources** when finished and wait for `DELETED`. If the plan reaches `FAILED`,
+inspect its error and the CodeBuild build ID or CloudFormation stack events.
+
+The existing workflow API still supports configured CI/CD and existing-stack
+operations for operators.
 
 ## AWS layout
 
 The Python CDK stack in `infra/app.py` provisions a VPC, private ECS Fargate
-services for the API, dispatcher, result consumer, and five agents, an HTTPS
+services for the API, dispatcher, result consumer, five agents, and the app
+deployment worker, an HTTPS
 Application Load Balancer, RDS PostgreSQL, encrypted FIFO SQS queues with a
-dead-letter queue, ECR, Secrets Manager, CloudWatch Logs, and a Cognito user
+dead-letter queue, ECR, an app source S3 bucket, a shared CodeBuild project,
+an App Runner access role, Secrets Manager, CloudWatch Logs, and a Cognito user
 pool. `migrations/` contains the Alembic schema. The task outbox commits with
 workflow state; the dispatcher publishes pending tasks to SQS. Task claims and
 saved results protect against duplicate deliveries. Workers obtain AWS
@@ -151,7 +265,8 @@ prints a plan and makes no AWS calls:
 .venv/bin/python scripts/aws_cleanup.py --region us-east-1 --account-id 123456789012
 ```
 
-Choose `--mode stack` for only the application stack (staging or production),
+Choose `--mode stack` for the platform stack and all its managed application
+stacks (staging or production),
 `--mode all` for staging plus `CDKToolkit` and any report-backed leftovers, or
 `--mode leftovers` after the staging stack was already deleted. The default is
 `all` for staging. Add `--check` for a read-only AWS inventory, then `--execute`
@@ -160,8 +275,9 @@ and pass `--report PATH` if it is outside the project directory. A live stack's
 database and KMS IDs are captured before teardown, so a report is unnecessary
 for a fresh deletion. The script
 checks the account, shows a CDK diff for live stacks, and requires exact typed
-confirmations. Bootstrap deletion refuses to run while another CloudFormation
-stack is active in the account and Region. Leftover cleanup includes RDS
+confirmations. The script deletes managed App Runner stacks and their ECR
+repositories before the platform stack. Bootstrap deletion refuses to run while
+another CloudFormation stack is active in the account and Region. Leftover cleanup includes RDS
 snapshots and retained backups, the CDK asset bucket, staging GitHub OIDC role
 and provider, and the queue KMS key. KMS deletion has a mandatory waiting
 period; manually created resources outside these scopes require separate review.

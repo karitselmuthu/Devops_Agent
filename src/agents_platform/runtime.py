@@ -16,8 +16,11 @@ from agents.security_agent import SecurityAgent
 from agents_platform.persistence import DurableWorkflowStore
 from agents_platform.config import database_url
 from agents_platform.source import checkout_source
+from agents_platform.app_store import DurableAppStore
+from agents_platform.app_runtime import AppJobQueue, dispatch_app_jobs_once
 from agents_shared.models import AgentKind, TaskResultMessage, TaskStatus, WorkflowTask
 from agents_shared.sqs import SqsTaskBroker
+from agents_shared.results import bounded_result_output
 
 
 def aws_components() -> tuple[DurableWorkflowStore, SqsTaskBroker]:
@@ -114,7 +117,7 @@ def agent_once(
             workflow_id=message.workflow_id,
             task_id=message.task.id,
             status=status,
-            output=output[:10000],
+            output=bounded_result_output(output),
         )
         store.save_claimed_result(result)
         broker.publish_result(result)
@@ -133,6 +136,8 @@ def main() -> int:
     if args.role == "worker" and args.agent is None:
         parser.error("--agent is required for worker")
     store, broker = aws_components()
+    app_store = DurableAppStore(database_url()) if args.role == "dispatcher" else None
+    app_queue = AppJobQueue(os.environ["SQS_APP_DEPLOY_URL"]) if args.role == "dispatcher" else None
     agent = AgentKind(args.agent) if args.agent else None
     execute = make_agent(agent) if agent else None
     stop = Event()
@@ -140,7 +145,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     while not stop.is_set():
         if args.role == "dispatcher":
-            count = dispatch_once(store, broker)
+            count = dispatch_once(store, broker) + dispatch_app_jobs_once(app_store, app_queue)
             if count == 0:
                 stop.wait(1)
         elif args.role == "results":

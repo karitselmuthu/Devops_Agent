@@ -76,6 +76,15 @@ class SecurityAgent:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Invalid JSON report from {scanner}") from exc
 
+    def _report_path(self, filename: str) -> str:
+        if not filename:
+            return ""
+        path = Path(filename).resolve()
+        try:
+            return str(path.relative_to(self.repository))
+        except ValueError:
+            return path.name
+
     def _bandit(self) -> list[Finding]:
         result = self._run(
             ["bandit", "-r", "-f", "json", "-x", ".venv,.git", str(self.repository)]
@@ -90,7 +99,7 @@ class SecurityAgent:
                 scanner="bandit",
                 category="SAST",
                 rule=item.get("test_id", "unknown"),
-                file=item.get("filename", ""),
+                file=self._report_path(item.get("filename", "")),
                 line=item.get("line_number"),
                 severity=item.get("issue_severity"),
                 message=item.get("issue_text", ""),
