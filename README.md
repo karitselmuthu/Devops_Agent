@@ -282,6 +282,13 @@ snapshots and retained backups, the CDK asset bucket, staging GitHub OIDC role
 and provider, and the queue KMS key. KMS deletion has a mandatory waiting
 period; manually created resources outside these scopes require separate review.
 
+If `CDKToolkit` is gone but its default asset bucket or repository remains,
+`setup` will refuse to bootstrap. Check those assets with `--mode
+bootstrap-assets --check`; use `--mode bootstrap-assets --execute` only after
+reviewing the exact bucket and repository shown. This mode requires no active
+CloudFormation stacks and leaves the GitHub OIDC role, RDS backups, and other
+leftovers alone.
+
 The Cognito pool creates `agents-readers`, `agents-operators`, and
 `agents-admins` groups. Create users and assign groups before invoking the API.
 Readers can inspect workflows and tools, operators can create workflows, and

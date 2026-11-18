@@ -306,6 +306,42 @@ def matching_bootstrap_bucket(s3: object, account_id: str, region: str) -> str |
     return buckets[0] if buckets else None
 
 
+def bootstrap_asset_leftovers(session: boto3.Session, account_id: str, region: str,
+                              *, delete: bool) -> None:
+    """Clear only orphaned default CDK assets so bootstrap can be repeated."""
+    cloudformation = session.client("cloudformation")
+    active = active_stacks(cloudformation)
+    if active:
+        raise ValueError("Active stacks may use CDK assets: " + ", ".join(sorted(active)))
+    s3 = session.client("s3")
+    ecr = session.client("ecr")
+    expected_bucket = f"cdk-hnb659fds-assets-{account_id}-{region}"
+    expected_repository = f"cdk-hnb659fds-container-assets-{account_id}-{region}"
+    bucket = expected_bucket if expected_bucket in {
+        item["Name"] for item in s3.list_buckets()["Buckets"]
+    } else None
+    try:
+        ecr.describe_repositories(repositoryNames=[expected_repository])
+        repository = expected_repository
+    except ecr.exceptions.RepositoryNotFoundException:
+        repository = None
+    print(f"Orphaned CDK bucket: {bucket or 'absent'}")
+    print(f"Orphaned CDK ECR repository: {repository or 'absent'}")
+    if not delete:
+        print("Read-only inventory complete. No AWS changes were made.")
+        return
+    if not bucket and not repository:
+        return
+    phrase = f"DELETE BOOTSTRAP ASSETS {account_id} {region}"
+    if input(f"Type '{phrase}' to delete only these assets: ").strip() != phrase:
+        raise ValueError("Bootstrap asset cleanup cancelled")
+    if bucket:
+        empty_bucket(s3, bucket)
+        s3.delete_bucket(Bucket=bucket)
+    if repository:
+        ecr.delete_repository(repositoryName=repository, force=True)
+
+
 def oidc_role_users(iam: object, provider_arn: str) -> list[str]:
     return [
         role["RoleName"]
@@ -428,7 +464,7 @@ def execute(path: Path | None, account_id: str, region: str, *, delete: bool = T
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("stack", "all", "leftovers"), default="all")
+    parser.add_argument("--mode", choices=("stack", "all", "leftovers", "bootstrap-assets"), default="all")
     parser.add_argument("--environment", choices=("staging", "production"), default="staging")
     parser.add_argument("--region", required=True)
     parser.add_argument("--account-id", required=True)
@@ -456,6 +492,10 @@ def main() -> int:
         actual = session.client("sts").get_caller_identity()["Account"]
         if actual != args.account_id:
             raise ValueError(f"AWS account mismatch: expected {args.account_id}, got {actual}")
+        if args.mode == "bootstrap-assets":
+            bootstrap_asset_leftovers(session, args.account_id, args.region,
+                                      delete=args.execute)
+            return 0
         cloudformation = session.client("cloudformation")
         names = active_stacks(cloudformation)
         stack_name = f"AgentsPlatform-{args.environment}"
