@@ -31,5 +31,5 @@ build-backend = "hatchling.build"
 packages = ["src/agents_platform", "src/agents_shared", "src/planning_agent", "src/mcp_hub", "src/agents"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
