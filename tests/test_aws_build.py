@@ -11,6 +11,7 @@ build = run_path(
 )
 deployment_counts = build["deployment_counts"]
 previous_counts = build["previous_counts"]
+endpoint_parameters = build["endpoint_parameters"]
 
 
 def test_deployment_counts_keep_production_api_redundant(monkeypatch) -> None:
@@ -34,6 +35,16 @@ def test_previous_counts_preserve_legacy_service_count() -> None:
         {"ParameterKey": "ApiDesiredCount", "ParameterValue": "2"},
         {"ParameterKey": "BackgroundDesiredCount", "ParameterValue": "0"},
     ]}) == ("2", "0")
+
+
+def test_staging_uses_managed_https_without_domain_settings(monkeypatch) -> None:
+    monkeypatch.setenv("CLOUDFRONT_PREFIX_LIST_ID", "pl-3b927c52")
+    monkeypatch.delenv("CERTIFICATE_ARN", raising=False)
+    monkeypatch.delenv("API_DOMAIN", raising=False)
+    monkeypatch.delenv("HOSTED_ZONE_ID", raising=False)
+    assert endpoint_parameters("staging") == {"CloudFrontPrefixListId": "pl-3b927c52"}
+    with pytest.raises(ValueError, match="CERTIFICATE_ARN"):
+        endpoint_parameters("production")
 
 
 def test_setup_plan_makes_no_external_calls(monkeypatch, capsys) -> None:

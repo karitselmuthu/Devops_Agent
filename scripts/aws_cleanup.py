@@ -46,10 +46,11 @@ def cdk_command(action: str, stack_name: str, environment: str) -> list[str]:
 
 def parameter_arguments(stack: dict) -> list[str]:
     values = {item["ParameterKey"]: item["ParameterValue"] for item in stack["Parameters"]}
-    required = {"CertificateArn", "DomainName", "HostedZoneId"}
-    if not required <= values.keys():
+    custom_domain = {"CertificateArn", "DomainName", "HostedZoneId"}
+    managed_domain = {"CloudFrontPrefixListId", "StagingCognitoClientId"}
+    if not (custom_domain <= values.keys() or managed_domain <= values.keys()):
         raise ValueError("This stack predates the HTTPS template; migrate it before teardown")
-    supported = required | {
+    supported = custom_domain | managed_domain | {
         "ImageTag", "MigrationImageTag", "AllowedRepositories",
         "AllowedPipelines", "AllowedStacks", "OpenAIModel",
     }

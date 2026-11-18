@@ -35,6 +35,18 @@ def test_teardown_parameters_zero_services_and_preserve_current_settings() -> No
     assert not any("DesiredCount=1" in argument for argument in arguments)
 
 
+def test_teardown_supports_managed_https_parameters() -> None:
+    stack = {"Parameters": [
+        {"ParameterKey": "CloudFrontPrefixListId", "ParameterValue": "pl-3b927c52"},
+        {"ParameterKey": "StagingCognitoClientId", "ParameterValue": "client-id"},
+        {"ParameterKey": "ImageTag", "ParameterValue": "image"},
+    ]}
+    arguments = teardown["parameter_arguments"](stack)
+    assert "CloudFrontPrefixListId=pl-3b927c52" in arguments
+    assert "StagingCognitoClientId=client-id" in arguments
+    assert "ApiDesiredCount=0" in arguments
+
+
 def test_legacy_http_stack_refuses_destructive_update() -> None:
     with pytest.raises(ValueError, match="predates the HTTPS template"):
         teardown["parameter_arguments"]({"Parameters": []})

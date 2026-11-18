@@ -205,6 +205,16 @@ def deployment_counts(environment: str) -> tuple[int, int]:
     return (2 if environment == "production" else 1), int(background)
 
 
+def endpoint_parameters(environment: str) -> dict[str, str]:
+    if environment == "production":
+        return {
+            "CertificateArn": require_environment("CERTIFICATE_ARN"),
+            "DomainName": require_environment("API_DOMAIN"),
+            "HostedZoneId": require_environment("HOSTED_ZONE_ID"),
+        }
+    return {"CloudFrontPrefixListId": require_environment("CLOUDFRONT_PREFIX_LIST_ID")}
+
+
 def deploy() -> int:
     environment = require_environment("DEPLOY_ENVIRONMENT")
     if environment not in {"staging", "production"}:
@@ -213,12 +223,7 @@ def deploy() -> int:
     region = require_environment("AWS_REGION")
     github_token = require_environment("AGENTS_GITHUB_TOKEN")
     openai_key = require_environment("AGENTS_OPENAI_API_KEY")
-    domain = require_environment("API_DOMAIN")
-    domain_parameters = {
-        "CertificateArn": require_environment("CERTIFICATE_ARN"),
-        "DomainName": domain,
-        "HostedZoneId": require_environment("HOSTED_ZONE_ID"),
-    }
+    endpoint_settings = endpoint_parameters(environment)
     stack_name = f"AgentsPlatform-{environment}"
     session = aws_session(region)
     cloudformation = session.client("cloudformation")
@@ -228,7 +233,7 @@ def deploy() -> int:
         deploy_stack(
             stack_name, environment,
             {
-                **domain_parameters,
+                **endpoint_settings,
                 "AllowedRepositories": os.environ.get("ALLOWED_REPOSITORIES", ""),
                 "AllowedPipelines": os.environ.get("ALLOWED_PIPELINES", ""),
                 "AllowedStacks": os.environ.get("ALLOWED_STACKS", ""),
@@ -240,6 +245,10 @@ def deploy() -> int:
         stack = describe_stack(cloudformation, stack_name)
     previous_image_tag = parameter(stack, "ImageTag")
     previous_api_count, previous_background_count = previous_counts(stack)
+    client_parameters = (
+        {"StagingCognitoClientId": output(stack, "UserPoolClientId")}
+        if environment == "staging" else {}
+    )
     secrets = session.client("secretsmanager")
     for output_name, secret_value in (
         ("GitHubTokenSecretArn", github_token),
@@ -256,7 +265,8 @@ def deploy() -> int:
     run("docker", "push", f"{repository_uri}:{image_tag}")
 
     deploy_stack(stack_name, environment, {
-        **domain_parameters,
+        **endpoint_settings,
+        **client_parameters,
         "MigrationImageTag": image_tag,
         "ApiDesiredCount": previous_api_count,
         "BackgroundDesiredCount": previous_background_count,
@@ -288,6 +298,7 @@ def deploy() -> int:
             stack_name, environment,
             {
                 "ImageTag": image_tag,
+                **client_parameters,
                 "ApiDesiredCount": str(api_count),
                 "BackgroundDesiredCount": str(background_count),
                 "AllowedRepositories": os.environ.get("ALLOWED_REPOSITORIES", ""),
@@ -296,7 +307,7 @@ def deploy() -> int:
                 "OpenAIModel": require_environment("OPENAI_MODEL"),
             },
         )
-        url = f"https://{domain}/health"
+        url = f"https://{output(stack, 'ApiDomain')}/health"
         print(f"Health check: {url}")
         for attempt in range(12):
             try:
@@ -311,6 +322,7 @@ def deploy() -> int:
             stack_name, environment,
             {
                 "ImageTag": previous_image_tag,
+                **client_parameters,
                 "ApiDesiredCount": previous_api_count,
                 "BackgroundDesiredCount": previous_background_count,
             },

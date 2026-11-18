@@ -186,7 +186,9 @@ operations for operators.
 The Python CDK stack in `infra/app.py` provisions a VPC, private ECS Fargate
 services for the API, dispatcher, result consumer, five agents, and the app
 deployment worker, an HTTPS
-Application Load Balancer, RDS PostgreSQL, encrypted FIFO SQS queues with a
+Application Load Balancer in production. Staging uses a CloudFront managed
+HTTPS domain and VPC origin to reach a private HTTP Application Load Balancer.
+Both environments also provision RDS PostgreSQL, encrypted FIFO SQS queues with a
 dead-letter queue, ECR, an app source S3 bucket, a shared CodeBuild project,
 an App Runner access role, Secrets Manager, CloudWatch Logs, and a Cognito user
 pool. `migrations/` contains the Alembic schema. The task outbox commits with
@@ -210,26 +212,32 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
   repository-scoped AWS IAM role through OIDC. Set `AWS_DEPLOY_ROLE_ARN` in the
   selected GitHub environment. Do not put AWS access keys in GitHub secrets.
 
-1. Choose an AWS account, Region, public Route 53 hosted zone, API domain, and
-   an ACM certificate for that domain in the same Region as the load balancer.
-   Run `aws login` and `gh auth login`, then use the one-time setup command:
+1. Choose an AWS account and Region. Staging uses a temporary CloudFront HTTPS
+   URL; no domain registration, Route 53 zone, or ACM certificate is needed.
+   Production still requires a public Route 53 hosted zone, API domain, and an
+   ACM certificate for that domain in the load balancer's Region. Run `aws login`
+   and `gh auth login`, then use the one-time setup command:
 
    ```bash
    .venv/bin/python scripts/aws_build.py setup --region us-east-1 --environment staging --execute
    ```
 
    If a previous `CDKToolkit` stack was deleted but its asset bucket remains,
-   run the cleanup script first. Setup refuses to bootstrap over that bucket.
+   run `scripts/aws_cleanup.py --mode bootstrap-assets --check` with `--region`
+   and `--account-id`, then its `--execute` mode after reviewing the named
+   assets. Setup refuses to bootstrap over that bucket.
 2. Create `staging` and, if needed,
    `production` GitHub environments. Protect production with environment
    reviewers and restrict deployment branches.
-3. Configure each environment's variables: `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`,
-   `CERTIFICATE_ARN`, `API_DOMAIN`, `HOSTED_ZONE_ID`, `OPENAI_MODEL`,
-   `ALLOWED_REPOSITORIES`, `ALLOWED_PIPELINES`, and `ALLOWED_STACKS`. The three
-   allowlists are comma-separated. Set environment secrets
-   `AGENTS_GITHUB_TOKEN` and `AGENTS_OPENAI_API_KEY`.
-   Both staging and production require these domain and certificate values so
-   the public API is served over HTTPS.
+3. Configure both environments' variables `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`,
+   `OPENAI_MODEL`, `ALLOWED_REPOSITORIES`, `ALLOWED_PIPELINES`, and
+   `ALLOWED_STACKS`. The three allowlists are comma-separated. For staging,
+   also set `CLOUDFRONT_PREFIX_LIST_ID` to the AWS-managed
+   `com.amazonaws.global.cloudfront.origin-facing` prefix list ID in the selected
+   Region. Find it with `aws ec2 describe-managed-prefix-lists --region us-east-1
+   --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing`.
+   Production instead needs `CERTIFICATE_ARN`, `API_DOMAIN`, and `HOSTED_ZONE_ID`.
+   Set environment secrets `AGENTS_GITHUB_TOKEN` and `AGENTS_OPENAI_API_KEY`.
 4. The setup command creates the repository-scoped GitHub OIDC role, bootstraps
    CDK, and sets `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` in the GitHub environment.
    Configure production environment reviewers separately.
@@ -240,7 +248,8 @@ server. `agents_shared` contains the Pydantic contracts and broker adapter.
 6. Push `main` to run tests, then run the manual `Deploy AWS` workflow for
    staging. The release creates the stack
    with services at zero, builds and pushes the image, runs the migration task,
-   starts services, and checks `GET /health`. Use the manual `Deploy AWS`
+   starts services, and checks `GET /health` at the stack's `ApiDomain` output.
+   In staging this is a `*.cloudfront.net` name. Use the manual `Deploy AWS`
    workflow for production. Confirm ECS service stability, SQS dead-letter
    counts, and an authenticated workflow before accepting the release.
 

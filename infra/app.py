@@ -26,6 +26,8 @@ from aws_cdk import (
     aws_sqs as sqs,
     aws_s3 as s3,
     aws_codebuild as codebuild,
+    aws_cloudfront as cloudfront,
+    aws_cloudfront_origins as cloudfront_origins,
 )
 from constructs import Construct
 
@@ -41,9 +43,17 @@ class AgentsPlatformStack(Stack):
             self.termination_protection = True
         persistent_policy = RemovalPolicy.DESTROY if teardown else RemovalPolicy.RETAIN
 
-        certificate_arn = CfnParameter(self, "CertificateArn", type="String")
-        domain_name = CfnParameter(self, "DomainName", type="String")
-        hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
+        if production:
+            certificate_arn = CfnParameter(self, "CertificateArn", type="String")
+            domain_name = CfnParameter(self, "DomainName", type="String")
+            hosted_zone_id = CfnParameter(self, "HostedZoneId", type="String")
+        else:
+            cloudfront_prefix_list_id = CfnParameter(
+                self, "CloudFrontPrefixListId", type="String", allowed_pattern="^pl-[0-9a-f]+$"
+            )
+            staging_client_id = CfnParameter(
+                self, "StagingCognitoClientId", type="String", default="bootstrap"
+            )
         image_tag = CfnParameter(self, "ImageTag", type="String", default="bootstrap")
         migration_image_tag = CfnParameter(self, "MigrationImageTag", type="String", default="bootstrap")
         api_desired_count = CfnParameter(self, "ApiDesiredCount", type="Number", default=0)
@@ -165,17 +175,21 @@ class AgentsPlatformStack(Stack):
         openai_secret = secretsmanager.Secret(self, "OpenAIKey", removal_policy=persistent_policy)
         pool = cognito.UserPool(self, "UserPool", self_sign_up_enabled=False,
                                 removal_policy=persistent_policy)
-        app_client = pool.add_client(
-            "ApiClient",
-            generate_secret=False,
-            auth_flows=cognito.AuthFlow(user_password=True, user_srp=True),
-            o_auth=cognito.OAuthSettings(
-                flows=cognito.OAuthFlows(authorization_code_grant=True),
-                scopes=[cognito.OAuthScope.OPENID],
-                callback_urls=[f"https://{domain_name.value_as_string}/"],
-                logout_urls=[f"https://{domain_name.value_as_string}/"],
-            ),
-        )
+        def add_app_client(url: str) -> cognito.UserPoolClient:
+            return pool.add_client(
+                "ApiClient",
+                generate_secret=False,
+                auth_flows=cognito.AuthFlow(user_password=True, user_srp=True),
+                o_auth=cognito.OAuthSettings(
+                    flows=cognito.OAuthFlows(authorization_code_grant=True),
+                    scopes=[cognito.OAuthScope.OPENID],
+                    callback_urls=[url],
+                    logout_urls=[url],
+                ),
+            )
+
+        if production:
+            app_client = add_app_client(f"https://{domain_name.value_as_string}/")
         login_domain = pool.add_domain(
             "LoginDomain",
             cognito_domain=cognito.CognitoDomainOptions(
@@ -232,7 +246,10 @@ class AgentsPlatformStack(Stack):
             if role == "Api":
                 container.add_port_mappings(ecs.PortMapping(container_port=8000))
                 container.add_environment("COGNITO_USER_POOL_ID", pool.user_pool_id)
-                container.add_environment("COGNITO_APP_CLIENT_ID", app_client.user_pool_client_id)
+                container.add_environment(
+                    "COGNITO_APP_CLIENT_ID",
+                    app_client.user_pool_client_id if production else staging_client_id.value_as_string,
+                )
                 container.add_environment("COGNITO_DOMAIN", login_domain.base_url())
             return task
 
@@ -269,24 +286,51 @@ class AgentsPlatformStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[api_sg],
         )
-        alb = elbv2.ApplicationLoadBalancer(self, "LoadBalancer", vpc=vpc, internet_facing=True)
-        listener = alb.add_listener(
-            "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
-                self, "Certificate", certificate_arn.value_as_string
-            )],
-        )
-        alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
-            protocol="HTTPS", port="443", permanent=True
-        ))
-        route53.CfnRecordSet(
-            self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
-            name=domain_name.value_as_string, type="A",
-            alias_target=route53.CfnRecordSet.AliasTargetProperty(
-                dns_name=alb.load_balancer_dns_name,
-                hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
-                evaluate_target_health=True,
+        alb = elbv2.ApplicationLoadBalancer(
+            self, "LoadBalancer", vpc=vpc, internet_facing=production,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PUBLIC if production else ec2.SubnetType.PRIVATE_WITH_EGRESS
             ),
         )
+        if production:
+            listener = alb.add_listener(
+                "Https", port=443, certificates=[acm.Certificate.from_certificate_arn(
+                    self, "Certificate", certificate_arn.value_as_string
+                )],
+            )
+            alb.add_listener("HttpRedirect", port=80, default_action=elbv2.ListenerAction.redirect(
+                protocol="HTTPS", port="443", permanent=True
+            ))
+            route53.CfnRecordSet(
+                self, "ApiDnsRecord", hosted_zone_id=hosted_zone_id.value_as_string,
+                name=domain_name.value_as_string, type="A",
+                alias_target=route53.CfnRecordSet.AliasTargetProperty(
+                    dns_name=alb.load_balancer_dns_name,
+                    hosted_zone_id=alb.load_balancer_canonical_hosted_zone_id,
+                    evaluate_target_health=True,
+                ),
+            )
+            api_domain = domain_name.value_as_string
+        else:
+            listener = alb.add_listener("Http", port=80, open=False)
+            cloudfront_origin_prefix = ec2.PrefixList.from_prefix_list_id(
+                self, "CloudFrontOriginPrefix", cloudfront_prefix_list_id.value_as_string
+            )
+            alb.connections.allow_from(cloudfront_origin_prefix, ec2.Port.tcp(80))
+            distribution = cloudfront.Distribution(
+                self, "StagingDistribution",
+                default_behavior=cloudfront.BehaviorOptions(
+                    origin=cloudfront_origins.VpcOrigin.with_application_load_balancer(
+                        alb, protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY
+                    ),
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                ),
+            )
+            api_domain = distribution.distribution_domain_name
+            app_client = add_app_client(f"https://{api_domain}/")
         listener.add_targets(
             "ApiTargets", port=8000,
             targets=[api_service.load_balancer_target(container_name="Api", container_port=8000)],
@@ -401,7 +445,7 @@ class AgentsPlatformStack(Stack):
             )
 
         CfnOutput(self, "LoadBalancerDns", value=alb.load_balancer_dns_name)
-        CfnOutput(self, "ApiDomain", value=domain_name.value_as_string)
+        CfnOutput(self, "ApiDomain", value=api_domain)
         CfnOutput(self, "RepositoryUri", value=repository.repository_uri)
         CfnOutput(self, "ClusterArn", value=cluster.cluster_arn)
         CfnOutput(self, "MigrationTaskArn", value=migration_task.task_definition_arn)
