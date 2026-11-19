@@ -373,7 +373,17 @@ function renderAppStatus(plan) {
   }
 }
 
-async function showAppStatus(id) {
+async function showAppStatus(id, reveal = false) {
+  if (reveal) {
+    deployPlanSection.hidden = true;
+    deployStatusSection.hidden = false;
+    const status = document.getElementById('deploy-status-value');
+    status.textContent = 'loading';
+    status.className = 'status-pill';
+    document.getElementById('deploy-delete-button').hidden = true;
+    clearError(document.getElementById('deploy-status-error'));
+    deployStatusSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
   try {
     const plan = await api(`/apps/${encodeURIComponent(id)}`);
     renderAppStatus(plan);
@@ -381,6 +391,7 @@ async function showAppStatus(id) {
     deployStatusSection.hidden = false;
     if (['APPROVED', 'BUILDING', 'DEPLOYING', 'DELETING'].includes(plan.status)) beginAppPolling();
   } catch (error) {
+    if (reveal) document.getElementById('deploy-status-value').textContent = 'unavailable';
     showError(document.getElementById('deploy-status-error'), error.message);
   }
 }
@@ -434,7 +445,7 @@ async function loadAppList() {
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = 'View';
-      button.addEventListener('click', () => showAppStatus(plan.id));
+      button.addEventListener('click', () => showAppStatus(plan.id, true));
       item.append(details, button);
       list.append(item);
     }
