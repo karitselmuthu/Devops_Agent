@@ -293,6 +293,7 @@ function renderAppPlan(plan) {
   document.getElementById('deploy-plan-commit').textContent = plan.source_commit;
   document.getElementById('deploy-plan-name').textContent = plan.request.name;
   document.getElementById('deploy-plan-port').textContent = String(plan.request.port);
+  document.getElementById('deploy-plan-health-path').textContent = plan.request.health_path;
   document.getElementById('deploy-plan-stack').textContent = plan.stack_name;
   const list = document.getElementById('deploy-resources');
   list.replaceChildren();
