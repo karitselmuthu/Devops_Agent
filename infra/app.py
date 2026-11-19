@@ -155,6 +155,14 @@ class AgentsPlatformStack(Stack):
                      "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
             resources=[f"arn:{self.partition}:ecr:{self.region}:{self.account}:repository/agents-app-*"],
         ))
+        # Keep the previous worker image bootable during the first deployment phase.
+        app_runner_access_role = iam.Role(
+            self, "AppRunnerEcrAccessRole",
+            assumed_by=iam.ServicePrincipal("build.apprunner.amazonaws.com"),
+            managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSAppRunnerServicePolicyForECRAccess"
+            )],
+        )
 
         repository = ecr.Repository(
             self, "Repository", removal_policy=persistent_policy,
@@ -386,6 +394,7 @@ class AgentsPlatformStack(Stack):
             extra_env={
                 "APP_SOURCE_BUCKET": app_source_bucket.bucket_name,
                 "APP_CODEBUILD_PROJECT": app_build.project_name,
+                "APP_RUNNER_ACCESS_ROLE_ARN": app_runner_access_role.role_arn,
                 "APP_PLATFORM_STACK": self.stack_name,
             },
             extra_secrets={"GITHUB_TOKEN": ecs.Secret.from_secrets_manager(github_secret)},
@@ -415,6 +424,17 @@ class AgentsPlatformStack(Stack):
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
             actions=["cloudformation:DescribeStacks"], resources=[self.stack_id],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["apprunner:CreateService", "apprunner:DescribeService", "apprunner:DeleteService",
+                     "apprunner:TagResource"], resources=["*"],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"], resources=[app_runner_access_role.role_arn],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:CreateServiceLinkedRole"], resources=["*"],
+            conditions={"StringEquals": {"iam:AWSServiceName": "apprunner.amazonaws.com"}},
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
             actions=["elasticloadbalancing:DescribeRules"], resources=["*"],
@@ -507,6 +527,7 @@ class AgentsPlatformStack(Stack):
         CfnOutput(self, "AppLoadBalancerSecurityGroupId", value=alb.connections.security_groups[0].security_group_id)
         CfnOutput(self, "AppTaskExecutionRoleArn", value=app_execution_role.role_arn)
         CfnOutput(self, "AppLogGroupName", value=image_log.log_group_name)
+        CfnOutput(self, "AppRunnerAccessRoleArn", value=app_runner_access_role.role_arn)
         if not production:
             CfnOutput(self, "AppPortalDistributionId", value=distribution.distribution_id)
 
