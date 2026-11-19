@@ -32,6 +32,7 @@ class AppPlanRequest(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,30}$")
     environment: Literal["staging", "production"] = "staging"
     port: int = Field(ge=1, le=65535)
+    health_path: str = Field(default="/health", pattern=r"^/[A-Za-z0-9/_-]*$", max_length=256)
 
     @model_validator(mode="after")
     def valid_repository(self) -> "AppPlanRequest":
@@ -91,7 +92,9 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
         resources=[
             PlannedResource(service="ECR", name="Application image repository", purpose="Store built images"),
             PlannedResource(service="CodeBuild", name="Container build", purpose="Build and push one image", billed_while_running=True),
-            PlannedResource(service="App Runner", name="Web service", purpose="Serve the container over HTTPS", billed_while_running=True),
+            PlannedResource(service="ECS Fargate", name="Web service", purpose="Run the container in the shared cluster", billed_while_running=True),
+            PlannedResource(service="Application Load Balancer", name="Routing rule", purpose="Route this app through the platform load balancer"),
+            PlannedResource(service="CloudFront", name="Application HTTPS URL", purpose="Give the app a separate HTTPS address; usage billed"),
         ],
         ecr_repository="pending",
         stack_name="pending",
@@ -103,4 +106,6 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
     deployment.resources[0].name = deployment.ecr_repository
     deployment.resources[1].name = "Shared platform CodeBuild project"
     deployment.resources[2].name = f"{request.name[:30]}-{deployment.id.hex[:8]}"
+    deployment.resources[3].name = f"{request.name[:30]}-{deployment.id.hex[:8]}"
+    deployment.resources[4].name = f"{request.name[:30]}-{deployment.id.hex[:8]}"
     return deployment

@@ -12,6 +12,7 @@ from agents_platform.auth import Principal
 from agents_platform.orchestrator import Orchestrator
 from agents_platform.persistence import Base
 from agents_shared.messaging import InMemoryTaskBroker
+from pydantic import ValidationError
 
 
 def request() -> AppPlanRequest:
@@ -19,6 +20,11 @@ def request() -> AppPlanRequest:
         repository_url="https://github.com/acme/web-app", ref="main",
         name="web-app", environment="staging", port=8080,
     )
+
+
+def test_health_path_must_be_an_absolute_path() -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate({**request().model_dump(), "health_path": "health/ready"})
 
 
 def test_plan_requires_root_dockerfile_and_pins_commit(monkeypatch) -> None:
@@ -36,7 +42,9 @@ def test_plan_requires_root_dockerfile_and_pins_commit(monkeypatch) -> None:
     assert plan.source_commit == "a" * 40
     assert plan.image_tag == "a" * 12
     assert plan.ecr_repository.startswith("agents-app-staging-")
-    assert [item.service for item in plan.resources] == ["ECR", "CodeBuild", "App Runner"]
+    assert [item.service for item in plan.resources] == [
+        "ECR", "CodeBuild", "ECS Fargate", "Application Load Balancer", "CloudFront",
+    ]
 
     def no_dockerfile(_target, destination: Path) -> None:
         destination.mkdir()

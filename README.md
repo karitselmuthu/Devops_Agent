@@ -145,14 +145,17 @@ developer machine.
 
 The portal has two flows. The source check accepts a GitHub URL, branch,
 application name, and environment, then displays scanner results. The application
-deployment flow accepts the same GitHub source plus an HTTP port. It requires a
-root `Dockerfile`, pins the reviewed commit, and displays an ECR repository,
-CodeBuild job, and App Runner service as its resource plan. It flags resources
-that bill while running; it does not calculate an AWS price estimate. An
-administrator approves the plan before any build or AWS resource creation.
-The background worker archives the pinned commit, builds and pushes its image to
-ECR, then creates an App Runner service through a CloudFormation change set.
-The portal shows build/deployment status, the HTTPS URL, and a Delete action.
+deployment flow accepts the same GitHub source, an HTTP port, and a health check
+path. It requires a root `Dockerfile`, pins the reviewed commit, and displays an
+ECR repository, CodeBuild job, ECS Fargate service, load balancer rule, and
+CloudFront URL as its resource plan. It flags resources that bill while running;
+it does not calculate an AWS price estimate. An administrator approves the plan
+before any build or AWS resource creation. The background worker archives the
+pinned commit, builds and pushes its image to ECR, then creates the application
+resources through a CloudFormation change set. Each application uses the
+platform's existing ECS cluster, VPC, and load balancer. Its separate CloudFront
+URL serves the application at `/`. The portal shows build/deployment status,
+the HTTPS URL, and a Delete action.
 Deletion removes the application stack, ECR repository, and temporary source
 archive. Build and deployment failures are shown in the plan status.
 
@@ -170,9 +173,10 @@ require the deployed AWS platform.
 
 To try the new flow locally, start the API as described above, open the portal,
 and enter a real GitHub repository with a root `Dockerfile`, its branch, an app
-name, and its HTTP port under **Application deployment**. Select **Create resource
-plan** and verify the commit, stack name, ECR repository, App Runner service,
-and billable steps. The **Approve and deploy** button appears only on the AWS
+name, HTTP port, and health check path under **Application deployment**. Select
+**Create resource plan** and verify the commit, stack name, ECR repository, ECS
+service, load balancer rule, CloudFront URL, and billable steps. The **Approve
+and deploy** button appears only on the AWS
 platform. There, sign in as an `agents-admins` user, approve the plan, refresh
 until the status is `RUNNING`, and open the HTTPS URL. Select **Delete app
 resources** when finished and wait for `DELETED`. If the plan reaches `FAILED`,
@@ -190,7 +194,7 @@ Application Load Balancer in production. Staging uses a CloudFront managed
 HTTPS domain and VPC origin to reach a private HTTP Application Load Balancer.
 Both environments also provision RDS PostgreSQL, encrypted FIFO SQS queues with a
 dead-letter queue, ECR, an app source S3 bucket, a shared CodeBuild project,
-an App Runner access role, Secrets Manager, CloudWatch Logs, and a Cognito user
+Secrets Manager, CloudWatch Logs, and a Cognito user
 pool. `migrations/` contains the Alembic schema. The task outbox commits with
 workflow state; the dispatcher publishes pending tasks to SQS. Task claims and
 saved results protect against duplicate deliveries. Workers obtain AWS
@@ -284,7 +288,7 @@ and pass `--report PATH` if it is outside the project directory. A live stack's
 database and KMS IDs are captured before teardown, so a report is unnecessary
 for a fresh deletion. The script
 checks the account, shows a CDK diff for live stacks, and requires exact typed
-confirmations. The script deletes managed App Runner stacks and their ECR
+confirmations. The script deletes managed application stacks and their ECR
 repositories before the platform stack. Bootstrap deletion refuses to run while
 another CloudFormation stack is active in the account and Region. Leftover cleanup includes RDS
 snapshots and retained backups, the CDK asset bucket, staging GitHub OIDC role
