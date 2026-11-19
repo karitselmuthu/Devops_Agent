@@ -231,6 +231,21 @@ class AgentsPlatformStack(Stack):
                 memory_limit_mib=1024 if large_task else 512,
             )
             task.add_volume(name="scratch")
+            scratch_init = task.add_container(
+                f"{role}ScratchInit",
+                image=image,
+                entry_point=["/bin/sh", "-c"],
+                command=["chmod 1777 /tmp"],
+                user="0",
+                essential=False,
+                readonly_root_filesystem=True,
+                logging=ecs.LogDrivers.aws_logs(
+                    stream_prefix=f"{role.lower()}-scratch", log_group=image_log
+                ),
+            )
+            scratch_init.add_mount_points(ecs.MountPoint(
+                container_path="/tmp", source_volume="scratch", read_only=False
+            ))
             container = task.add_container(
                 role,
                 image=image,
@@ -242,6 +257,10 @@ class AgentsPlatformStack(Stack):
             )
             container.add_mount_points(ecs.MountPoint(
                 container_path="/tmp", source_volume="scratch", read_only=False
+            ))
+            container.add_container_dependencies(ecs.ContainerDependency(
+                container=scratch_init,
+                condition=ecs.ContainerDependencyCondition.SUCCESS,
             ))
             if role == "Api":
                 container.add_port_mappings(ecs.PortMapping(container_port=8000))
