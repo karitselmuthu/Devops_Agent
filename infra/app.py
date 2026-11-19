@@ -408,7 +408,8 @@ class AgentsPlatformStack(Stack):
             ],
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
-            actions=["apprunner:CreateService", "apprunner:DescribeService", "apprunner:DeleteService"],
+            actions=["apprunner:CreateService", "apprunner:DescribeService", "apprunner:DeleteService",
+                     "apprunner:TagResource"],
             resources=["*"],
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
