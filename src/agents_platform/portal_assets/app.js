@@ -248,9 +248,12 @@ authReady = initAuth().then(() => {
     refreshStatus().then(() => { if (!statusError.hidden) return; beginPolling(); });
   }
   if (!portalConfig.authentication_required || accessToken) {
-    loadAppList();
-    const savedApp = sessionStorage.getItem('agents.appId');
-    if (savedApp) showAppStatus(savedApp);
+    loadAppList().then((plans) => {
+      const active = plans?.find((plan) => ['APPROVED', 'BUILDING', 'DEPLOYING'].includes(plan.status));
+      if (active) sessionStorage.setItem('agents.appId', active.id);
+      const savedApp = sessionStorage.getItem('agents.appId');
+      if (savedApp) showAppStatus(savedApp);
+    });
   }
 }).catch((error) => {
   form.hidden = true;
@@ -262,6 +265,12 @@ const deployPlanSection = document.getElementById('deploy-plan');
 const deployStatusSection = document.getElementById('deploy-status');
 let currentDeploymentId = null;
 let appPollTimer = null;
+let appStatusRequest = 0;
+
+function updateLatestAppButton() {
+  const savedApp = sessionStorage.getItem('agents.appId');
+  document.getElementById('latest-app-button').hidden = !savedApp || savedApp === currentDeploymentId;
+}
 
 deployForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -275,7 +284,11 @@ deployForm.addEventListener('submit', async (event) => {
   try {
     const plan = await api('/apps/plans', { method: 'POST', body: JSON.stringify(draft) });
     currentDeploymentId = plan.id;
+    appStatusRequest += 1;
+    if (appPollTimer) clearInterval(appPollTimer);
+    appPollTimer = null;
     sessionStorage.setItem('agents.appId', plan.id);
+    updateLatestAppButton();
     renderAppPlan(plan);
     deployStatusSection.hidden = true;
     deployPlanSection.hidden = false;
@@ -347,7 +360,7 @@ document.getElementById('deploy-approve-button').addEventListener('click', async
 
 function renderAppStatus(plan) {
   currentDeploymentId = plan.id;
-  sessionStorage.setItem('agents.appId', plan.id);
+  updateLatestAppButton();
   document.getElementById('deploy-status-name').textContent = plan.request.name;
   const status = document.getElementById('deploy-status-value');
   status.textContent = plan.status.toLowerCase();
@@ -375,6 +388,13 @@ function renderAppStatus(plan) {
 }
 
 async function showAppStatus(id, reveal = false) {
+  const request = ++appStatusRequest;
+  if (currentDeploymentId !== id || reveal) {
+    if (appPollTimer) clearInterval(appPollTimer);
+    appPollTimer = null;
+  }
+  currentDeploymentId = id;
+  updateLatestAppButton();
   if (reveal) {
     deployPlanSection.hidden = true;
     deployStatusSection.hidden = false;
@@ -387,11 +407,13 @@ async function showAppStatus(id, reveal = false) {
   }
   try {
     const plan = await api(`/apps/${encodeURIComponent(id)}`);
+    if (request !== appStatusRequest) return;
     renderAppStatus(plan);
     deployPlanSection.hidden = true;
     deployStatusSection.hidden = false;
     if (['APPROVED', 'BUILDING', 'DEPLOYING', 'DELETING'].includes(plan.status)) beginAppPolling();
   } catch (error) {
+    if (request !== appStatusRequest) return;
     if (reveal) document.getElementById('deploy-status-value').textContent = 'unavailable';
     showError(document.getElementById('deploy-status-error'), error.message);
   }
@@ -404,6 +426,11 @@ function beginAppPolling() {
 
 document.getElementById('deploy-refresh-button').addEventListener('click', () => {
   if (currentDeploymentId) showAppStatus(currentDeploymentId);
+});
+
+document.getElementById('latest-app-button').addEventListener('click', () => {
+  const savedApp = sessionStorage.getItem('agents.appId');
+  if (savedApp) showAppStatus(savedApp, true);
 });
 
 document.getElementById('deploy-delete-button').addEventListener('click', async () => {
@@ -450,6 +477,7 @@ async function loadAppList() {
       item.append(details, button);
       list.append(item);
     }
+    return plans;
   } catch (error) {
     const list = document.getElementById('app-list');
     list.textContent = error.message;
