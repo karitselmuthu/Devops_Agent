@@ -1,13 +1,13 @@
 # AWS resource flow
 
-This diagram compares the code pushed to `main` and `feature/sam-repository-deployment`. It describes the staging configuration in `infra/app.py` and the application stacks created by `src/agents_platform/app_aws.py`. It does not show which resources currently exist in AWS.
+This diagram describes the deployment paths now in `main`, based on the staging configuration in `infra/app.py` and application stacks created by `src/agents_platform/app_aws.py`. It does not show which resources currently exist in AWS.
 
-| Branch | Application deployment path |
+| Blueprint | Application deployment path |
 | --- | --- |
-| `main` | Root Dockerfile → CodeBuild → ECR → ECS Fargate, shared ALB routing, and application CloudFront URL |
-| `feature/sam-repository-deployment` | Keeps the Dockerfile path and adds a restricted root SAM template → separate CodeBuild project → Lambda, on-demand DynamoDB, and IAM-protected Function URL |
+| Container | Root Dockerfile → CodeBuild → ECR → ECS Fargate, shared ALB routing, and application CloudFront URL |
+| Restricted SAM | Root SAM template → separate CodeBuild project → Lambda, on-demand DynamoDB, and IAM-protected Function URL |
 
-The SAM path is proposed in a draft PR and is not part of `main`. This file does not establish whether a branch has been deployed to AWS.
+The SAM path was added in [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5). It still needs a live staging deployment test before its AWS integration is confirmed.
 
 ```mermaid
 flowchart LR
