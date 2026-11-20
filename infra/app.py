@@ -168,7 +168,7 @@ class AgentsPlatformStack(Stack):
                     "python3 -m pip install --quiet uv",
                     "sh build.sh",
                     "test -f build/handler.py",
-                    "cd build && zip -qr ../lambda.zip .",
+                    "(cd build && zip -qr ../lambda.zip .)",
                     'aws s3 cp lambda.zip "s3://$APP_SOURCE_BUCKET/sam-artifacts/$APP_DEPLOYMENT_ID.zip" --sse AES256',
                 ]}},
             }),
