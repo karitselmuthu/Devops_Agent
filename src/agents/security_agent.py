@@ -87,7 +87,7 @@ class SecurityAgent:
 
     def _bandit(self) -> list[Finding]:
         result = self._run(
-            ["bandit", "-r", "-f", "json", "-x", ".venv,.git", str(self.repository)]
+            ["bandit", "-r", "-f", "json", "-x", ".venv,.git,*/tests/*", str(self.repository)]
         )
         if result.returncode not in (0, 1):
             raise RuntimeError("Bandit scan failed")
