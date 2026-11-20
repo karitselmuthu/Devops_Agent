@@ -13,7 +13,8 @@ import boto3
 import httpx
 from botocore.exceptions import ClientError
 
-from agents_platform.app_deployments import AppDeployment, DeploymentStatus
+from agents_platform.app_deployments import AppDeployment, DeploymentKind, DeploymentStatus
+from agents_platform.sam_blueprint import load_sam_template, packaged_sam_template, sam_template_digest
 from agents_platform.source import checkout_source
 
 
@@ -172,19 +173,22 @@ def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformReso
 class AppAwsDeployer:
     def __init__(self, *, region: str, source_bucket: str, build_project: str,
                  platform_stack: str, clients: dict[str, object] | None = None,
+                 sam_build_project: str | None = None, sam_role_arn: str | None = None,
                  poll_interval: float = 10, timeout_seconds: float = 2400) -> None:
         if not all((region, source_bucket, build_project, platform_stack)):
             raise ValueError("App deployment AWS settings are required")
         self.region = region
         self.source_bucket = source_bucket
         self.build_project = build_project
+        self.sam_build_project = sam_build_project
+        self.sam_role_arn = sam_role_arn
         self.platform_stack = platform_stack
         self.poll_interval = poll_interval
         self.timeout_seconds = timeout_seconds
         session = boto3.Session(region_name=region) if clients is None else None
         self.clients = clients or {
             name: session.client(name)
-            for name in ("ecr", "s3", "codebuild", "cloudformation", "elbv2", "cloudfront")
+            for name in ("ecr", "s3", "codebuild", "cloudformation", "elbv2", "cloudfront", "lambda")
         }
 
     @classmethod
@@ -193,12 +197,18 @@ class AppAwsDeployer:
             region=os.environ["AWS_REGION"],
             source_bucket=os.environ["APP_SOURCE_BUCKET"],
             build_project=os.environ["APP_CODEBUILD_PROJECT"],
+            sam_build_project=os.environ.get("APP_SAM_BUILD_PROJECT"),
+            sam_role_arn=os.environ.get("APP_SAM_CLOUDFORMATION_ROLE_ARN"),
             platform_stack=os.environ["APP_PLATFORM_STACK"],
         )
 
     @staticmethod
     def _source_key(plan: AppDeployment) -> str:
         return f"app-sources/{plan.id}/source.zip"
+
+    @staticmethod
+    def _sam_artifact_key(plan: AppDeployment) -> str:
+        return f"sam-artifacts/{plan.id}.zip"
 
     def _platform_resources(self, plan: AppDeployment) -> PlatformResources:
         if self.platform_stack != f"AgentsPlatform-{plan.request.environment}":
@@ -268,7 +278,12 @@ class AppAwsDeployer:
         ).stdout.strip()
         if commit != plan.source_commit:
             raise RuntimeError("Repository branch changed after review. Create a new deployment plan.")
-        if not (repository / "Dockerfile").is_file():
+        if plan.deployment_kind == DeploymentKind.SAM_LAMBDA:
+            template_path = repository / "template.yaml"
+            load_sam_template(template_path)
+            if sam_template_digest(template_path) != plan.template_digest:
+                raise RuntimeError("SAM template changed after review. Create a new plan.")
+        elif not (repository / "Dockerfile").is_file():
             raise RuntimeError("The approved Dockerfile is missing")
         archive = workspace / "source.zip"
         subprocess.run(
@@ -289,18 +304,18 @@ class AppAwsDeployer:
             if status == "SUCCEEDED":
                 return
             if status in {"FAILED", "FAULT", "STOPPED", "TIMED_OUT"}:
-                raise RuntimeError(f"Container build {status.lower()}; inspect CodeBuild build {build_id}")
+                raise RuntimeError(f"Application build {status.lower()}; inspect CodeBuild build {build_id}")
             time.sleep(self.poll_interval)
-        raise TimeoutError("Container build did not finish within the deployment timeout")
+        raise TimeoutError("Application build did not finish within the deployment timeout")
 
-    def _wait_change_set(self, plan: AppDeployment, change_set_id: str) -> None:
+    def _wait_change_set(self, plan: AppDeployment, change_set_id: str) -> dict:
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
             response = self.clients["cloudformation"].describe_change_set(
                 StackName=plan.stack_name, ChangeSetName=change_set_id
             )
             if response["Status"] == "CREATE_COMPLETE":
-                return
+                return response
             if response["Status"] == "FAILED":
                 raise RuntimeError("Application change set failed; inspect CloudFormation events")
             time.sleep(self.poll_interval)
@@ -331,6 +346,9 @@ class AppAwsDeployer:
         raise RuntimeError(f"Application health check failed at {path}")
 
     def deploy(self, plan: AppDeployment, store) -> None:
+        if plan.deployment_kind == DeploymentKind.SAM_LAMBDA:
+            self._deploy_sam(plan, store)
+            return
         platform = self._platform_resources(plan)
         priority = self._listener_priority(platform.listener_arn)
         store.set_status(plan.id, DeploymentStatus.BUILDING, error=None)
@@ -379,6 +397,81 @@ class AppAwsDeployer:
         self._wait_health(url, plan.request.health_path)
         store.set_status(plan.id, DeploymentStatus.RUNNING, service_url=url)
 
+    def _deploy_sam(self, plan: AppDeployment, store) -> None:
+        if not self.sam_build_project or not self.sam_role_arn:
+            raise RuntimeError("SAM deployment settings are missing from the platform")
+        if self.platform_stack != f"AgentsPlatform-{plan.request.environment}":
+            raise ValueError("App environment does not match the platform stack")
+        store.set_status(plan.id, DeploymentStatus.BUILDING, error=None)
+        with TemporaryDirectory() as temporary:
+            archive = self._source_archive(plan, Path(temporary))
+            template = load_sam_template(Path(temporary) / "source" / "template.yaml")
+            self.clients["s3"].upload_file(
+                str(archive), self.source_bucket, self._source_key(plan),
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+        try:
+            build = self.clients["codebuild"].start_build(
+                projectName=self.sam_build_project,
+                sourceTypeOverride="S3",
+                sourceLocationOverride=f"{self.source_bucket}/{self._source_key(plan)}",
+                environmentVariablesOverride=[
+                    {"name": "APP_SOURCE_BUCKET", "value": self.source_bucket, "type": "PLAINTEXT"},
+                    {"name": "APP_DEPLOYMENT_ID", "value": str(plan.id), "type": "PLAINTEXT"},
+                ],
+                idempotencyToken=str(plan.id),
+            )
+            build_id = build["build"]["id"]
+            store.set_status(plan.id, DeploymentStatus.BUILDING, build_id=build_id)
+            self._wait_build(build_id)
+        finally:
+            self.clients["s3"].delete_object(Bucket=self.source_bucket, Key=self._source_key(plan))
+        artifact_key = self._sam_artifact_key(plan)
+        self.clients["s3"].head_object(Bucket=self.source_bucket, Key=artifact_key)
+        store.set_status(plan.id, DeploymentStatus.DEPLOYING)
+        change_set = self.clients["cloudformation"].create_change_set(
+            StackName=plan.stack_name,
+            ChangeSetName=f"agents-app-{plan.id.hex[:12]}",
+            ChangeSetType="CREATE",
+            TemplateBody=packaged_sam_template(template, self.source_bucket, artifact_key),
+            Capabilities=["CAPABILITY_IAM", "CAPABILITY_AUTO_EXPAND"],
+            RoleARN=self.sam_role_arn,
+            Tags=[{"Key": "ManagedBy", "Value": "AgentsPlatform"},
+                  {"Key": "DeploymentId", "Value": str(plan.id)}],
+        )
+        preview = self._wait_change_set(plan, change_set["Id"])
+        allowed = {"AWS::Lambda::Function", "AWS::Lambda::Url", "AWS::Lambda::Permission",
+                   "AWS::IAM::Role", "AWS::DynamoDB::Table"}
+        actual = {item["ResourceChange"]["ResourceType"] for item in preview.get("Changes", [])
+                  if "ResourceChange" in item}
+        if not actual or actual - allowed:
+            raise RuntimeError("SAM change set contains unsupported resource types")
+        self.clients["cloudformation"].execute_change_set(
+            StackName=plan.stack_name, ChangeSetName=change_set["Id"],
+        )
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            stack = self.clients["cloudformation"].describe_stacks(StackName=plan.stack_name)["Stacks"][0]
+            status = stack["StackStatus"]
+            if status == "CREATE_COMPLETE":
+                outputs = {item["OutputKey"]: item["OutputValue"] for item in stack.get("Outputs", [])}
+                url = outputs["Url"]
+                resources = self.clients["cloudformation"].describe_stack_resources(StackName=plan.stack_name)
+                function = next(item["PhysicalResourceId"] for item in resources["StackResources"]
+                                if item["LogicalResourceId"] == "Api")
+                result = self.clients["lambda"].invoke(
+                    FunctionName=function, InvocationType="RequestResponse", Payload=b'{"body":"{}"}',
+                )
+                payload = json.loads(result["Payload"].read())
+                if result.get("FunctionError") or payload.get("statusCode") != 400:
+                    raise RuntimeError("Lambda smoke check failed; inspect function logs")
+                store.set_status(plan.id, DeploymentStatus.RUNNING, service_url=url)
+                return
+            if "ROLLBACK" in status or status.endswith("FAILED"):
+                raise RuntimeError(f"Application stack failed: {status}")
+            time.sleep(self.poll_interval)
+        raise TimeoutError("SAM application stack did not finish")
+
     def delete(self, plan: AppDeployment, store) -> None:
         cloudformation = self.clients["cloudformation"]
         try:
@@ -389,10 +482,13 @@ class AppAwsDeployer:
         else:
             cloudformation.delete_stack(StackName=plan.stack_name)
             cloudformation.get_waiter("stack_delete_complete").wait(StackName=plan.stack_name)
-        ecr = self.clients["ecr"]
-        try:
-            ecr.delete_repository(repositoryName=plan.ecr_repository, force=True)
-        except ecr.exceptions.RepositoryNotFoundException:
-            pass
+        if plan.deployment_kind == DeploymentKind.SAM_LAMBDA:
+            self.clients["s3"].delete_object(Bucket=self.source_bucket, Key=self._sam_artifact_key(plan))
+        else:
+            ecr = self.clients["ecr"]
+            try:
+                ecr.delete_repository(repositoryName=plan.ecr_repository, force=True)
+            except ecr.exceptions.RepositoryNotFoundException:
+                pass
         self.clients["s3"].delete_object(Bucket=self.source_bucket, Key=self._source_key(plan))
         store.set_status(plan.id, DeploymentStatus.DELETED, service_url=None, error=None)

@@ -143,43 +143,50 @@ developer machine.
 
 ### Web portal scope
 
-The portal has two flows. The source check accepts a GitHub URL, branch,
-application name, and environment, then displays scanner results. The application
-deployment flow accepts the same GitHub source, an HTTP port, and a health check
-path. It requires a root `Dockerfile`, pins the reviewed commit, and displays an
-ECR repository, CodeBuild job, ECS Fargate service, load balancer rule, and
-CloudFront URL as its resource plan. It flags resources that bill while running;
-it does not calculate an AWS price estimate. An administrator approves the plan
-before any build or AWS resource creation. The background worker archives the
-pinned commit, builds and pushes its image to ECR, then creates the application
-resources through a CloudFormation change set. Each application uses the
-platform's existing ECS cluster, VPC, and load balancer. Its separate CloudFront
-URL serves the application at `/`. The portal shows build/deployment status,
-the HTTPS URL, and a Delete action.
-Deletion removes the application stack, ECR repository, and temporary source
-archive. Build and deployment failures are shown in the plan status.
+The portal has two flows: source checks and application deployment. Deployment
+planning inspects a pinned GitHub commit and chooses a supported blueprint. A
+root `Dockerfile` uses CodeBuild, ECR, the shared ECS cluster and load balancer,
+and a separate CloudFront URL. A supported root `template.yaml` using the AWS
+SAM transform uses an isolated CodeBuild project, a Lambda function, an on-demand
+DynamoDB table, and an IAM-protected Lambda Function URL. The current SAM adapter
+is intentionally narrow: one Python 3.12 `Api` function with `CodeUri: build/`,
+a root `build.sh`, IAM URL authentication, and only the resource and IAM shapes
+accepted by `sam_blueprint.py`. Other templates are rejected during planning.
+
+The plan shows the blueprint, pinned commit, resources, cost drivers, and
+prerequisites. An administrator approves it before any build or resource
+creation. The SAM build runs without deployment permissions. The worker checks
+the generated CloudFormation change set's resource types before execution and
+invokes Lambda with an invalid request as a no-model-cost smoke check. A
+`RUNNING` status confirms deployment and this smoke check; it does not verify
+Bedrock model access or S3 Vectors retrieval. IAM-protected Function URLs require
+SigV4 and return 403 when opened directly in an unsigned browser request.
+Deletion removes the application stack and its ECR repository or SAM build
+artifact, as applicable.
 
 In AWS mode, the portal uses the Cognito managed login authorization code flow
 with PKCE. Operators can create plans; readers can view plans and status;
 administrators can approve and delete. Only GitHub repositories in
-`ALLOWED_REPOSITORIES` are accepted. Use repositories whose Dockerfile builds a
-web server that listens on the supplied port. This blueprint does not provision
-application databases, secrets, domains, or custom network access. Review a
-repository before allowlisting it: its Dockerfile runs in the shared CodeBuild
-project with permissions to push platform-managed application images. Source
-checks are separate from deployment approval, so review their results before
+`ALLOWED_REPOSITORIES` are accepted. For a Dockerfile app, the platform infers
+the port from a single `EXPOSE` and the health path from a local Dockerfile
+health URL when possible; otherwise enter them. For a SAM app, the port and
+container health path are unused. The SAM blueprint does not create an S3
+Vectors bucket or ingest documents. Bedrock access, optional provider secrets,
+and private retrieval prerequisites must be reviewed for that repository.
+Review a repository before allowlisting it: its build script runs in CodeBuild.
+Source checks are separate from deployment approval, so review their results before
 approving a plan. In local mode you can preview a plan; approval and AWS actions
 require the deployed AWS platform.
 
-To try the new flow locally, start the API as described above, open the portal,
-and enter a real GitHub repository with a root `Dockerfile`, its branch, an app
-name, HTTP port, and health check path under **Application deployment**. Select
-**Create resource plan** and verify the commit, stack name, ECR repository, ECS
-service, load balancer rule, CloudFront URL, and billable steps. The **Approve
-and deploy** button appears only on the AWS
-platform. There, sign in as an `agents-admins` user, approve the plan, refresh
-until the status is `RUNNING`, and open the HTTPS URL. Select **Delete app
-resources** when finished and wait for `DELETED`. If the plan reaches `FAILED`,
+To try the flow locally, start the API as described above, open the portal,
+and enter an allowlisted GitHub repository under **Application deployment**.
+The branch defaults to `main`, and the app name is inferred from the repository.
+Select **Create resource plan** and verify the commit, blueprint, stack name,
+resources, prerequisites, and billable steps. The **Approve and deploy** button
+appears only on the AWS platform. There, sign in as an `agents-admins` user,
+approve the plan, and refresh until the status is `RUNNING`. For a container app,
+open the HTTPS URL. For a SAM app, use a SigV4-signed client to invoke its URL.
+Select **Delete app resources** when finished and wait for `DELETED`. If the plan reaches `FAILED`,
 inspect its error and the CodeBuild build ID or CloudFormation stack events.
 
 The existing workflow API still supports configured CI/CD and existing-stack
@@ -193,7 +200,7 @@ deployment worker, an HTTPS
 Application Load Balancer in production. Staging uses a CloudFront managed
 HTTPS domain and VPC origin to reach a private HTTP Application Load Balancer.
 Both environments also provision RDS PostgreSQL, encrypted FIFO SQS queues with a
-dead-letter queue, ECR, an app source S3 bucket, a shared CodeBuild project,
+dead-letter queue, ECR, an app source S3 bucket, container and SAM CodeBuild projects,
 Secrets Manager, CloudWatch Logs, and a Cognito user
 pool. `migrations/` contains the Alembic schema. The task outbox commits with
 workflow state; the dispatcher publishes pending tasks to SQS. Task claims and
