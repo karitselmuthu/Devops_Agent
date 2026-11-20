@@ -210,6 +210,11 @@ class AgentsPlatformStack(Stack):
         sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:GetObject"], resources=[app_source_bucket.arn_for_objects("sam-artifacts/*")],
         ))
+        # CloudFormation expands AWS::Serverless-2016-10-31 as this role and needs access to the transform.
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["cloudformation:CreateChangeSet"],
+            resources=[f"arn:{self.partition}:cloudformation:{self.region}:aws:transform/Serverless-2016-10-31"],
+        ))
         # Keep the previous worker image bootable during the first deployment phase.
         app_runner_access_role = iam.Role(
             self, "AppRunnerEcrAccessRole",
