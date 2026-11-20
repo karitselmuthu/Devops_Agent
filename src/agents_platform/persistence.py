@@ -66,8 +66,11 @@ class DurableWorkflowStore:
     def create(self, request: WorkflowRequest) -> WorkflowPlan:
         plan = create_plan(request)
         with Session(self.engine) as session, session.begin():
+            row = WorkflowRow(id=str(plan.id), data=plan.model_dump(mode="json"))
+            session.add(row)
+            session.flush()  # the outbox row has a foreign key to this one; Postgres enforces the order
             self._queue(session, plan, plan.tasks[0])
-            session.add(WorkflowRow(id=str(plan.id), data=plan.model_dump(mode="json")))
+            row.data = plan.model_dump(mode="json")
         return plan
 
     def get(self, workflow_id: UUID) -> WorkflowPlan:
