@@ -1,12 +1,12 @@
 # Deploy `multi_agent_rag` through DevOps Agent
 
-Checked against the pushed branches on 20 November 2026. This is a self-service runbook; writing it created no AWS resources.
+Checked against `main` on 20 November 2026. This is a self-service runbook; writing it created no AWS resources.
 
 ## Readiness snapshot
 
 | Item | State |
 | --- | --- |
-| DevOps Agent deployment code | Draft [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5) on `feature/sam-repository-deployment`; CI `verify` passed |
+| DevOps Agent deployment code | [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5) merged into `main`; CI `verify` passed before merge |
 | AWS deployment workflow | Runs from `main`; the setup code restricts the staging GitHub OIDC role and environment branch policy to `main` (verify live settings before release) |
 | Staging allowlist | Currently contains only `karitselmuthu/Enterprise_AI_Model_Router`; add `karitselmuthu/multi_agent_rag` |
 | Target source | `https://github.com/karitselmuthu/multi_agent_rag`, branch `main`; root `template.yaml` and `build.sh` match the restricted SAM blueprint |
@@ -31,9 +31,8 @@ If the platform stack is absent, the workflow will create the full platform, inc
 
 ## 2. Release the DevOps Agent code
 
-1. Open [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5), review the changes and passing CI, mark the draft ready, and merge it into `main`.
-2. Confirm the `main` branch now contains `src/agents_platform/sam_blueprint.py` and the SAM additions in `infra/app.py`.
-3. In the `staging` GitHub environment, add the target repository while retaining the existing allowed repository:
+1. Confirm the `main` branch contains `src/agents_platform/sam_blueprint.py` and the SAM additions in `infra/app.py`.
+2. In the `staging` GitHub environment, add the target repository while retaining the existing allowed repository:
 
    ```bash
    gh variable set ALLOWED_REPOSITORIES --env staging --repo karitselmuthu/Devops_Agent \
@@ -44,13 +43,13 @@ If the platform stack is absent, the workflow will create the full platform, inc
 
    Verify `AWS_REGION=us-east-1`, `AWS_DEPLOY_ROLE_ARN`, `CLOUDFRONT_PREFIX_LIST_ID`, and `OPENAI_MODEL`. The secret list must contain `AGENTS_GITHUB_TOKEN` and `AGENTS_OPENAI_API_KEY`; their values are not displayed. The release script requires both secrets.
 
-4. In GitHub **Actions → Deploy AWS → Run workflow**, select branch `main` and environment `staging`. Or run:
+3. In GitHub **Actions → Deploy AWS → Run workflow**, select branch `main` and environment `staging`. Or run:
 
    ```bash
    gh workflow run deploy.yml --ref main -f environment=staging --repo karitselmuthu/Devops_Agent
    ```
 
-5. Watch that GitHub Actions run to completion. A green CI check on PR #5 does not deploy AWS resources. If `BACKGROUND_DESIRED_COUNT` is `0`, set it to `1` and redeploy; the application worker will not process approved plans while background services are stopped.
+4. Watch that GitHub Actions run to completion. CI does not deploy AWS resources. If `BACKGROUND_DESIRED_COUNT` is `0`, set it to `1` and redeploy; the application worker will not process approved plans while background services are stopped.
 
 ## 3. Create and approve the application plan
 
