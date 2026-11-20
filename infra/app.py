@@ -155,6 +155,61 @@ class AgentsPlatformStack(Stack):
                      "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
             resources=[f"arn:{self.partition}:ecr:{self.region}:{self.account}:repository/agents-app-*"],
         ))
+        app_sam_build = codebuild.Project(
+            self, "AppSamBuild",
+            source=codebuild.Source.s3(bucket=app_source_bucket, path="app-sources/placeholder.zip"),
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                compute_type=codebuild.ComputeType.SMALL,
+            ),
+            build_spec=codebuild.BuildSpec.from_object({
+                "version": "0.2",
+                "phases": {"build": {"commands": [
+                    "python3 -m pip install --quiet uv",
+                    "sh build.sh",
+                    "test -f build/handler.py",
+                    "cd build && zip -qr ../lambda.zip .",
+                    'aws s3 cp lambda.zip "s3://$APP_SOURCE_BUCKET/sam-artifacts/$APP_DEPLOYMENT_ID.zip" --sse AES256',
+                ]}},
+            }),
+            timeout=Duration.minutes(30),
+        )
+        app_source_bucket.grant_read(app_sam_build.role)
+        app_sam_build.role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"], resources=[app_source_bucket.arn_for_objects("sam-artifacts/*")],
+        ))
+        sam_cloudformation_role = iam.Role(
+            self, "AppSamCloudFormationRole",
+            assumed_by=iam.ServicePrincipal("cloudformation.amazonaws.com"),
+        )
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["lambda:CreateFunction", "lambda:DeleteFunction", "lambda:GetFunction",
+                     "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
+                     "lambda:CreateFunctionUrlConfig", "lambda:DeleteFunctionUrlConfig",
+                     "lambda:GetFunctionUrlConfig", "lambda:AddPermission", "lambda:RemovePermission",
+                     "lambda:GetPolicy", "lambda:TagResource", "lambda:UntagResource"],
+            resources=[f"arn:{self.partition}:lambda:{self.region}:{self.account}:function:AgentsApp-*"],
+        ))
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:DescribeTable",
+                     "dynamodb:UpdateTimeToLive", "dynamodb:DescribeTimeToLive",
+                     "dynamodb:TagResource", "dynamodb:UntagResource"],
+            resources=[f"arn:{self.partition}:dynamodb:{self.region}:{self.account}:table/AgentsApp-*"],
+        ))
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
+                     "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy",
+                     "iam:DetachRolePolicy", "iam:TagRole", "iam:UntagRole"],
+            resources=[f"arn:{self.partition}:iam::{self.account}:role/AgentsApp-*"],
+        ))
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"],
+            resources=[f"arn:{self.partition}:iam::{self.account}:role/AgentsApp-*"],
+            conditions={"StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}},
+        ))
+        sam_cloudformation_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"], resources=[app_source_bucket.arn_for_objects("sam-artifacts/*")],
+        ))
         # Keep the previous worker image bootable during the first deployment phase.
         app_runner_access_role = iam.Role(
             self, "AppRunnerEcrAccessRole",
@@ -394,6 +449,8 @@ class AgentsPlatformStack(Stack):
             extra_env={
                 "APP_SOURCE_BUCKET": app_source_bucket.bucket_name,
                 "APP_CODEBUILD_PROJECT": app_build.project_name,
+                "APP_SAM_BUILD_PROJECT": app_sam_build.project_name,
+                "APP_SAM_CLOUDFORMATION_ROLE_ARN": sam_cloudformation_role.role_arn,
                 "APP_RUNNER_ACCESS_ROLE_ARN": app_runner_access_role.role_arn,
                 "APP_PLATFORM_STACK": self.stack_name,
             },
@@ -405,8 +462,20 @@ class AgentsPlatformStack(Stack):
             resources=[app_source_bucket.arn_for_objects("app-sources/*")],
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject"],
+            resources=[app_source_bucket.arn_for_objects("sam-artifacts/*")],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
             actions=["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
-            resources=[app_build.project_arn],
+            resources=[app_build.project_arn, app_sam_build.project_arn],
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"], resources=[sam_cloudformation_role.role_arn],
+            conditions={"StringEquals": {"iam:PassedToService": "cloudformation.amazonaws.com"}},
+        ))
+        app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[f"arn:{self.partition}:lambda:{self.region}:{self.account}:function:AgentsApp-*"],
         ))
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
             actions=["ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository",
@@ -416,7 +485,7 @@ class AgentsPlatformStack(Stack):
         app_worker_task.task_role.add_to_policy(iam.PolicyStatement(
             actions=["cloudformation:CreateChangeSet", "cloudformation:DescribeChangeSet",
                      "cloudformation:ExecuteChangeSet", "cloudformation:DescribeStacks",
-                     "cloudformation:DeleteStack"],
+                     "cloudformation:DescribeStackResources", "cloudformation:DeleteStack"],
             resources=[
                 f"arn:{self.partition}:cloudformation:{self.region}:{self.account}:stack/AgentsApp-*/*",
                 f"arn:{self.partition}:cloudformation:{self.region}:{self.account}:changeSet/agents-app-*/*",
@@ -521,6 +590,7 @@ class AgentsPlatformStack(Stack):
         CfnOutput(self, "OpenAIKeySecretArn", value=openai_secret.secret_arn)
         CfnOutput(self, "AppSourceBucketName", value=app_source_bucket.bucket_name)
         CfnOutput(self, "AppCodeBuildProjectName", value=app_build.project_name)
+        CfnOutput(self, "AppSamBuildProjectName", value=app_sam_build.project_name)
         CfnOutput(self, "AppListenerArn", value=listener.listener_arn)
         CfnOutput(self, "AppVpcId", value=vpc.vpc_id)
         CfnOutput(self, "AppLoadBalancerArn", value=alb.load_balancer_arn)

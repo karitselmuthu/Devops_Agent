@@ -29,6 +29,29 @@ def test_health_path_must_be_an_absolute_path() -> None:
         AppPlanRequest.model_validate({**request().model_dump(), "health_path": "health/ready"})
 
 
+def test_repository_url_can_infer_app_name_and_container_settings(monkeypatch) -> None:
+    def checkout(_target, destination: Path) -> None:
+        destination.mkdir()
+        (destination / "Dockerfile").write_text(
+            'FROM python:3.12-slim\nEXPOSE 8000\n'
+            'HEALTHCHECK CMD python -c "http://127.0.0.1:8000/health/ready"\n'
+        )
+
+    monkeypatch.setattr(app_deployments, "checkout_source", checkout)
+    monkeypatch.setattr(
+        app_deployments.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "a" * 40 + "\n", ""),
+    )
+    plan = create_app_plan(
+        AppPlanRequest(repository_url="https://github.com/acme/Enterprise_AI_Model_Router"),
+        "operator-1",
+    )
+    assert plan.request.name == "enterprise-ai-model-router"
+    assert plan.request.ref == "main"
+    assert plan.request.port == 8000
+    assert plan.request.health_path == "/health/ready"
+
+
 def test_plan_requires_root_dockerfile_and_pins_commit(monkeypatch) -> None:
     def checkout(_target, destination: Path) -> None:
         destination.mkdir()

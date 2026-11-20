@@ -280,7 +280,9 @@ deployForm.addEventListener('submit', async (event) => {
   const button = document.getElementById('deploy-plan-button');
   button.disabled = true;
   const draft = Object.fromEntries(new FormData(deployForm).entries());
-  draft.port = Number(draft.port);
+  if (!draft.ref) delete draft.ref;
+  if (!draft.name) delete draft.name;
+  draft.port = draft.port ? Number(draft.port) : null;
   try {
     const plan = await api('/apps/plans', { method: 'POST', body: JSON.stringify(draft) });
     currentDeploymentId = plan.id;
@@ -305,9 +307,21 @@ function renderAppPlan(plan) {
   document.getElementById('deploy-plan-repository').textContent = plan.request.repository_url;
   document.getElementById('deploy-plan-commit').textContent = plan.source_commit;
   document.getElementById('deploy-plan-name').textContent = plan.request.name;
-  document.getElementById('deploy-plan-port').textContent = String(plan.request.port);
-  document.getElementById('deploy-plan-health-path').textContent = plan.request.health_path;
+  const sam = plan.deployment_kind === 'sam_lambda';
+  document.getElementById('deploy-plan-kind').textContent = sam ? 'Python SAM / Lambda' : 'Dockerfile / ECS';
+  document.getElementById('deploy-plan-port').textContent = sam ? 'Not applicable' : String(plan.request.port);
+  document.getElementById('deploy-plan-health-path').textContent = sam ? 'Lambda smoke check' : plan.request.health_path;
   document.getElementById('deploy-plan-stack').textContent = plan.stack_name;
+  document.getElementById('deploy-billing-note').textContent = sam
+    ? 'CodeBuild bills during packaging. Lambda, DynamoDB, Bedrock, and any configured S3 Vectors bill for usage. The existing platform continues billing while deployed. Approval starts the build and creates IAM roles, Lambda, and a DynamoDB table.'
+    : 'CodeBuild bills during the build. Fargate bills while the app task runs. CloudFront bills for usage. The existing platform continues billing while deployed. Approval starts resource creation.';
+  const prerequisites = document.getElementById('deploy-prerequisites');
+  prerequisites.replaceChildren();
+  for (const requirement of plan.prerequisites || []) {
+    const item = document.createElement('li');
+    item.textContent = requirement;
+    prerequisites.append(item);
+  }
   const list = document.getElementById('deploy-resources');
   list.replaceChildren();
   for (const resource of plan.resources) {
@@ -378,6 +392,9 @@ function renderAppStatus(plan) {
   } else {
     urlField.textContent = 'Pending';
   }
+  document.getElementById('deploy-access-note').textContent = plan.access_mode === 'aws_iam'
+    ? 'This Lambda Function URL requires an AWS SigV4-signed request; opening it directly in a browser returns 403.'
+    : '';
   const errorElement = document.getElementById('deploy-status-error');
   if (plan.error) showError(errorElement, plan.error); else clearError(errorElement);
   document.getElementById('deploy-delete-button').hidden = !portalConfig.app_deployment_enabled || plan.status === 'DELETED';
