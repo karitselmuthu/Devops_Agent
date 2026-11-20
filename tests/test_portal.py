@@ -14,6 +14,7 @@ def test_portal_serves_page_and_previews_repository() -> None:
     page = client.get("/")
     assert page.status_code == 200
     assert "Connect a repository" in page.text
+    assert 'id="task-summary"' in page.text
     assert client.get("/portal/style.css").status_code == 200
     assert client.get("/portal/app.js").status_code == 200
     assert client.get("/portal/config").json()["authentication_required"] is False
