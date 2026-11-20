@@ -70,6 +70,14 @@ def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformReso
                     "SecurityGroupEgress": [{"IpProtocol": "-1", "CidrIp": "0.0.0.0/0"}],
                 },
             },
+            "AppAlbEgress": {
+                "Type": "AWS::EC2::SecurityGroupEgress",
+                "Properties": {
+                    "GroupId": platform.load_balancer_security_group_id,
+                    "IpProtocol": "tcp", "FromPort": port, "ToPort": port,
+                    "DestinationSecurityGroupId": {"Ref": "AppSecurityGroup"},
+                },
+            },
             "AppTargetGroup": {
                 "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
                 "Properties": {
@@ -113,7 +121,7 @@ def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformReso
                 },
             },
             "AppService": {
-                "Type": "AWS::ECS::Service", "DependsOn": ["AppRule"],
+                "Type": "AWS::ECS::Service", "DependsOn": ["AppRule", "AppAlbEgress"],
                 "Properties": {
                     "ServiceName": service_name, "Cluster": platform.cluster_arn,
                     "TaskDefinition": {"Ref": "AppTaskDefinition"},

@@ -40,7 +40,8 @@ def test_template_reuses_platform_and_routes_only_approved_image() -> None:
     )
     resources = template["Resources"]
     assert {item["Type"] for item in resources.values()} == {
-        "AWS::EC2::SecurityGroup", "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "AWS::EC2::SecurityGroup", "AWS::EC2::SecurityGroupEgress",
+        "AWS::ElasticLoadBalancingV2::TargetGroup",
         "AWS::ElasticLoadBalancingV2::ListenerRule", "AWS::ECS::TaskDefinition",
         "AWS::ECS::Service", "AWS::CloudFront::Distribution",
     }
@@ -49,7 +50,11 @@ def test_template_reuses_platform_and_routes_only_approved_image() -> None:
     assert task["ContainerDefinitions"][0]["PortMappings"][0]["ContainerPort"] == 8080
     assert "TaskRoleArn" not in task
     assert resources["AppTargetGroup"]["Properties"]["HealthCheckPath"] == "/health/ready"
-    assert resources["AppService"]["DependsOn"] == ["AppRule"]
+    egress = resources["AppAlbEgress"]["Properties"]
+    assert egress["GroupId"] == platform().load_balancer_security_group_id
+    assert egress["DestinationSecurityGroupId"] == {"Ref": "AppSecurityGroup"}
+    assert egress["FromPort"] == egress["ToPort"] == 8080
+    assert resources["AppService"]["DependsOn"] == ["AppRule", "AppAlbEgress"]
     assert resources["AppService"]["Properties"]["Cluster"] == platform().cluster_arn
     assert resources["AppService"]["Properties"]["DesiredCount"] == 1
     rule = resources["AppRule"]["Properties"]
