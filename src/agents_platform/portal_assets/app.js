@@ -157,6 +157,7 @@ form.addEventListener('submit', async (event) => {
     form.hidden = true;
     statusSection.hidden = true;
     previewSection.hidden = false;
+    setStep(2);
     previewSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
     showError(formError, error.message);
@@ -168,6 +169,7 @@ form.addEventListener('submit', async (event) => {
 document.getElementById('edit-button').addEventListener('click', () => {
   previewSection.hidden = true;
   form.hidden = false;
+  setStep(1);
   document.getElementById('repository-url').focus();
 });
 
@@ -194,6 +196,31 @@ document.getElementById('launch-button').addEventListener('click', async () => {
   }
 });
 
+const steps = document.querySelectorAll('.steps .step');
+// Highlight the current step (1-3); with done=true every step is marked complete.
+function setStep(current, done = false) {
+  steps.forEach((item, index) => {
+    item.classList.toggle('active', !done && index + 1 === current);
+    item.classList.toggle('done', done || index + 1 < current);
+  });
+}
+
+function summarizeScan(task) {
+  if (task.status !== 'COMPLETED' && task.status !== 'FAILED') return null;
+  let report = null;
+  try { report = JSON.parse(task.output); } catch (error) { /* not a scan report */ }
+  if (report && report.outcome === 'clean') {
+    return { kind: 'clean', text: `Scan clean: 0 findings (${report.scanners.join(', ')}). Nothing was deployed.` };
+  }
+  if (report && report.outcome === 'blocked') {
+    const counts = {};
+    report.findings.forEach((item) => { const level = (item.severity || 'unknown').toLowerCase(); counts[level] = (counts[level] || 0) + 1; });
+    const detail = Object.entries(counts).map(([level, count]) => `${count} ${level}`).join(', ');
+    return { kind: 'blocked', text: `Scan blocked: ${report.findings.length} finding${report.findings.length === 1 ? '' : 's'} (${detail}). Review the report below.` };
+  }
+  return { kind: 'error', text: 'The source check failed. See the details below.' };
+}
+
 function renderStatus(plan) {
   document.getElementById('workflow-id').textContent = plan.id;
   const task = plan.tasks[0];
@@ -203,6 +230,11 @@ function renderStatus(plan) {
   const output = document.getElementById('task-output');
   output.textContent = task.output || '';
   output.hidden = !task.output;
+  const summary = summarizeScan(task);
+  const summaryBox = document.getElementById('task-summary');
+  summaryBox.hidden = !summary;
+  if (summary) { summaryBox.className = `scan-summary ${summary.kind}`; summaryBox.textContent = summary.text; }
+  setStep(3, task.status === 'COMPLETED' || task.status === 'FAILED');
   if (task.status === 'COMPLETED' || task.status === 'FAILED') {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -237,6 +269,7 @@ document.getElementById('new-button').addEventListener('click', () => {
   previewSection.hidden = true;
   form.hidden = false;
   form.reset();
+  setStep(1);
   document.getElementById('repository-url').focus();
 });
 
@@ -282,6 +315,7 @@ deployForm.addEventListener('submit', async (event) => {
   const draft = Object.fromEntries(new FormData(deployForm).entries());
   if (!draft.ref) delete draft.ref;
   if (!draft.name) delete draft.name;
+  if (!draft.health_path) delete draft.health_path;
   draft.port = draft.port ? Number(draft.port) : null;
   try {
     const plan = await api('/apps/plans', { method: 'POST', body: JSON.stringify(draft) });
