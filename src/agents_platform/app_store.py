@@ -141,7 +141,11 @@ class DurableAppStore:
 
     def list_deployments(self, limit: int = 50) -> list[AppDeployment]:
         with Session(self.engine) as session:
-            rows = session.scalars(select(AppDeploymentRow).order_by(AppDeploymentRow.id.desc()).limit(limit)).all()
+            rows = session.scalars(
+                select(AppDeploymentRow)
+                .order_by(AppDeploymentRow.data["created_at"].as_string().desc(), AppDeploymentRow.id.desc())
+                .limit(limit)
+            ).all()
             return [AppDeployment.model_validate(row.data) for row in rows]
 
     def _transition(self, deployment_id: UUID, change) -> AppDeployment:

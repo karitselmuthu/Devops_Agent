@@ -1,5 +1,7 @@
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -76,6 +78,30 @@ def test_approval_and_deletion_have_idempotent_outbox(tmp_path: Path, durable: b
     assert store.request_delete(plan.id).status == DeploymentStatus.DELETING
     jobs = store.pending_jobs()
     assert len(jobs) == 1 and jobs[0].action == "delete"
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_recent_application_plans_are_newest_first(tmp_path: Path, durable: bool) -> None:
+    if durable:
+        store = DurableAppStore(f"sqlite:///{tmp_path / 'apps.db'}")
+        Base.metadata.create_all(store.engine)
+    else:
+        store = InMemoryAppStore()
+    old = app_deployments.AppDeployment(
+        id=UUID("ffffffff-ffff-4fff-8fff-ffffffffffff"), request=request(),
+        source_commit="a" * 40, created_by="operator-1", resources=[],
+        ecr_repository="old", stack_name="old", image_tag="a" * 12,
+        created_at=datetime(2026, 11, 19, tzinfo=timezone.utc),
+    )
+    new = old.model_copy(update={
+        "id": UUID("00000000-0000-4000-8000-000000000001"),
+        "ecr_repository": "new", "stack_name": "new",
+        "created_at": datetime(2026, 11, 20, tzinfo=timezone.utc),
+    })
+    store.create(old)
+    store.create(new)
+
+    assert [plan.id for plan in store.list_deployments()] == [new.id, old.id]
 
 
 def test_app_api_previews_locally_and_requires_admin_for_aws_approval(monkeypatch) -> None:
