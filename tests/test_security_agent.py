@@ -69,3 +69,16 @@ def test_findings_fail_worker_without_exposing_secret(tmp_path: Path) -> None:
     assert result.status == TaskStatus.FAILED
     assert "do-not-leak-this-value" not in result.output
     assert json.loads(result.output)["findings"][0]["rule"] == "generic-api-key"
+
+
+def test_bandit_runs_quiet_so_progress_bar_cannot_corrupt_json(tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+    agent = SecurityAgent(tmp_path, scanners=("bandit",))
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps({"results": []}), "")
+
+    agent._run = fake_run
+    agent.execute(WorkflowTask(agent=AgentKind.SECURITY, instruction="scan"))
+    assert "-q" in seen[0]
