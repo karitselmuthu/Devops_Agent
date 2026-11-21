@@ -39,6 +39,14 @@ class AppPlanRequest(BaseModel):
     environment: Literal["staging", "production"] = "staging"
     port: int | None = Field(default=None, ge=1, le=65535)
     health_path: str = Field(default="/health", pattern=r"^/[A-Za-z0-9/_-]*$", max_length=256)
+    # Relative to the repository root; the image is always built with the repository root as context.
+    dockerfile_path: str = Field(default="Dockerfile", pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$", max_length=256)
+
+    @model_validator(mode="after")
+    def valid_dockerfile_path(self) -> "AppPlanRequest":
+        if ".." in self.dockerfile_path.split("/"):
+            raise ValueError("dockerfile_path cannot contain '..'")
+        return self
 
     @model_validator(mode="after")
     def valid_repository(self) -> "AppPlanRequest":
@@ -89,6 +97,17 @@ class AppDeployment(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+def _missing_message(repository: Path, dockerfile_path: str) -> str:
+    found = sorted(
+        path.relative_to(repository).as_posix() for path in repository.rglob("Dockerfile")
+        if ".git" not in path.parts and not path.is_symlink()
+    )[:5]
+    message = f"A root Dockerfile (or the Dockerfile path you gave: {dockerfile_path}) or supported SAM template.yaml is required"
+    if found:
+        message += f". Dockerfiles found in this repository: {', '.join(found)}; enter one as the Dockerfile path"
+    return message
+
+
 def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
     from agents_platform.sam_blueprint import load_sam_template, sam_resources, sam_template_digest
 
@@ -96,13 +115,13 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
     with TemporaryDirectory() as temporary:
         repository = Path(temporary) / "source"
         checkout_source(source, repository)
-        dockerfile = repository / "Dockerfile"
+        dockerfile = repository / request.dockerfile_path
         sam_file = repository / "template.yaml"
         if sam_file.is_file():
             load_sam_template(sam_file)
             kind = DeploymentKind.SAM_LAMBDA
             digest = sam_template_digest(sam_file)
-        elif dockerfile.is_file() and not dockerfile.is_symlink():
+        elif dockerfile.is_file() and not dockerfile.is_symlink() and dockerfile.resolve().is_relative_to(repository.resolve()):
             docker_text = dockerfile.read_text(errors="replace")
             if request.port is None:
                 exposed = re.findall(r"(?im)^\s*EXPOSE\s+(\d+)(?:/tcp)?\s*(?:#.*)?$", docker_text)
@@ -119,7 +138,7 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
             kind = DeploymentKind.CONTAINER
             digest = None
         else:
-            raise ValueError("A root Dockerfile or supported SAM template.yaml is required")
+            raise ValueError(_missing_message(repository, request.dockerfile_path))
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repository,
             check=True, capture_output=True, text=True, timeout=10,

@@ -316,6 +316,7 @@ deployForm.addEventListener('submit', async (event) => {
   if (!draft.ref) delete draft.ref;
   if (!draft.name) delete draft.name;
   if (!draft.health_path) delete draft.health_path;
+  if (!draft.dockerfile_path) delete draft.dockerfile_path;
   draft.port = draft.port ? Number(draft.port) : null;
   try {
     const plan = await api('/apps/plans', { method: 'POST', body: JSON.stringify(draft) });

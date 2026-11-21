@@ -4,7 +4,7 @@ This diagram describes the deployment paths now in `main`, based on the staging 
 
 | Blueprint | Application deployment path |
 | --- | --- |
-| Container | Root Dockerfile → CodeBuild → ECR → ECS Fargate, shared ALB routing, and application CloudFront URL |
+| Container | Dockerfile (root, or an optional path) → CodeBuild → ECR → ECS Fargate, shared ALB routing, and application CloudFront URL |
 | Restricted SAM | Root SAM template → separate CodeBuild project → Lambda, on-demand DynamoDB, and IAM-protected Function URL |
 
 The SAM path was added in [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5). It still needs a live staging deployment test before its AWS integration is confirmed.

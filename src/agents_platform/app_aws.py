@@ -283,8 +283,11 @@ class AppAwsDeployer:
             load_sam_template(template_path)
             if sam_template_digest(template_path) != plan.template_digest:
                 raise RuntimeError("SAM template changed after review. Create a new plan.")
-        elif not (repository / "Dockerfile").is_file():
-            raise RuntimeError("The approved Dockerfile is missing")
+        else:
+            dockerfile = repository / plan.request.dockerfile_path
+            if (not dockerfile.is_file() or dockerfile.is_symlink()
+                    or not dockerfile.resolve().is_relative_to(repository.resolve())):
+                raise RuntimeError("The approved Dockerfile is missing")
         archive = workspace / "source.zip"
         subprocess.run(
             ["git", "archive", "--format=zip", "--output", str(archive), "HEAD"],
@@ -367,6 +370,7 @@ class AppAwsDeployer:
                 sourceLocationOverride=f"{self.source_bucket}/{self._source_key(plan)}",
                 environmentVariablesOverride=[
                     {"name": "IMAGE_URI", "value": image_uri, "type": "PLAINTEXT"},
+                    {"name": "DOCKERFILE_PATH", "value": plan.request.dockerfile_path, "type": "PLAINTEXT"},
                 ],
                 idempotencyToken=str(plan.id),
             )
