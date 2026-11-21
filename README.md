@@ -7,11 +7,20 @@ Local mode uses an in-memory store and broker for development.
 
 ## Project status
 
-The application, AWS deployment templates, and a first web portal for source checks
-are implemented and tested locally.
-An AWS environment has not yet been deployed. The Code Agent produces reviewable
-patches; it does not publish changes. The integration hub exposes HTTP tools and
-does not implement the MCP wire protocol.
+The application, AWS deployment templates, and a web portal for source checks and
+application deployment are implemented and tested locally (`pytest`).
+The staging platform has been deployed to AWS and torn down more than once during
+testing; none is kept running by default because it costs roughly $2-3 per day.
+The SAM (Lambda) deployment path has run end to end on AWS. The container path
+(ECR, ECS Fargate, CloudFront), Dockerfile paths, app settings and secret
+references, and task sizes are covered by unit tests and a synthesized template
+but have not yet run on AWS. The Code Agent produces reviewable patches; it does
+not publish changes. The integration hub exposes HTTP tools and does not
+implement the MCP wire protocol.
+
+See also [AWS_RESOURCE_FLOW.md](AWS_RESOURCE_FLOW.md) for resources and cost
+boundaries and [DEPLOY_MULTI_AGENT_RAG.md](DEPLOY_MULTI_AGENT_RAG.md) for a worked
+SAM deployment example.
 
 ## Architecture
 
@@ -145,16 +154,19 @@ developer machine.
 
 The portal has two flows: source checks and application deployment. Deployment
 planning inspects a pinned GitHub commit and chooses a supported blueprint. A
-`Dockerfile` (at the repository root, or at an optional **Dockerfile path** built with the repository root as context) uses CodeBuild, ECR, the shared ECS cluster and load balancer,
-and a separate CloudFront URL. A supported root `template.yaml` using the AWS
+`Dockerfile` uses CodeBuild, ECR, the shared ECS cluster and load balancer, and a
+separate CloudFront URL. The Dockerfile is at the repository root unless you enter
+an optional **Dockerfile path**; the image is always built with the repository
+root as context. A supported root `template.yaml` using the AWS
 SAM transform uses an isolated CodeBuild project, a Lambda function, an on-demand
 DynamoDB table, and an IAM-protected Lambda Function URL. The current SAM adapter
 is intentionally narrow: one Python 3.12 `Api` function with `CodeUri: build/`,
 a root `build.sh`, IAM URL authentication, and only the resource and IAM shapes
 accepted by `sam_blueprint.py`. Other templates are rejected during planning.
 
-Container apps run at 0.25 vCPU / 0.5 GB unless you pick a larger **Task size** (up to 2 vCPU / 16 GB, valid Fargate pairs only; larger costs more while running).
-Container apps can also take configuration. **Settings** (`KEY=value`) are written
+Container apps run at 0.25 vCPU / 0.5 GB unless you pick a larger **Task size**
+(up to 2 vCPU / 16 GB, valid Fargate pairs only; larger sizes cost more while
+running). Container apps can also take configuration. **Settings** (`KEY=value`) are written
 into the task definition and are visible in the plan, so never put secrets there.
 **Secret references** (`KEY=agents-app/<app-name>/<KEY>`) name a secret you create
 yourself in AWS Secrets Manager; ECS injects its value when the container starts,
@@ -186,8 +198,10 @@ container health path are unused. The SAM blueprint does not create an S3
 Vectors bucket or ingest documents. Bedrock access, optional provider secrets,
 and private retrieval prerequisites must be reviewed for that repository.
 Review a repository before allowlisting it: its build script runs in CodeBuild.
-Source checks are separate from deployment approval, so review their results before
-approving a plan. In local mode you can preview a plan; approval and AWS actions
+Source checks run Bandit (tests directories excluded), Trivy and Gitleaks; any
+finding blocks the check. Private repositories need `GITHUB_TOKEN`. Source checks
+are separate from deployment approval, so review their results before approving
+a plan. In local mode you can preview a plan; approval and AWS actions
 require the deployed AWS platform.
 
 To try the flow locally, start the API as described above, open the portal,
