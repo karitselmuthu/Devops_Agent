@@ -293,6 +293,21 @@ authReady = initAuth().then(() => {
   showError(document.getElementById('auth-message'), error.message);
 });
 
+// "KEY=value" per line -> object; blank lines and #comments are ignored.
+function parsePairs(text) {
+  const result = {};
+  (text || '').split('\n').forEach((raw, index) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) return;
+    const at = line.indexOf('=');
+    if (at < 1) throw new Error(`Line ${index + 1}: use KEY=value`);
+    const key = line.slice(0, at).trim();
+    if (Object.hasOwn(result, key)) throw new Error(`Line ${index + 1}: ${key} is listed twice`);
+    result[key] = line.slice(at + 1).trim();
+  });
+  return result;
+}
+
 const deployForm = document.getElementById('deploy-form');
 const deployPlanSection = document.getElementById('deploy-plan');
 const deployStatusSection = document.getElementById('deploy-status');
@@ -317,6 +332,18 @@ deployForm.addEventListener('submit', async (event) => {
   if (!draft.name) delete draft.name;
   if (!draft.health_path) delete draft.health_path;
   if (!draft.dockerfile_path) delete draft.dockerfile_path;
+  try {
+    const settings = parsePairs(draft.environment_text);
+    const secrets = parsePairs(draft.secrets_text);
+    if (Object.keys(settings).length) draft.environment_variables = settings;
+    if (Object.keys(secrets).length) draft.secret_refs = secrets;
+  } catch (error) {
+    showError(errorElement, error.message);
+    button.disabled = false;
+    return;
+  }
+  delete draft.environment_text;
+  delete draft.secrets_text;
   draft.port = draft.port ? Number(draft.port) : null;
   try {
     const plan = await api('/apps/plans', { method: 'POST', body: JSON.stringify(draft) });

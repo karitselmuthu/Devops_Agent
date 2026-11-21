@@ -52,6 +52,9 @@ h3{font-size:17px;letter-spacing:-.025em;margin:0 0 5px}
 .required{color:#cf7956}
 .field input,.field select{height:44px;width:100%;border:1px solid #cddbd5;border-radius:8px;background:#fff;color:#1b303b;padding:0 13px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s}
 .field input::placeholder{color:#9aa9ac}
+.field textarea{width:100%;border:1px solid #cddbd5;border-radius:8px;background:#fff;color:#1b303b;padding:10px 13px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;resize:vertical}
+.field textarea:focus{border-color:#328663;box-shadow:0 0 0 3px #d9f2e4}
+.field .hint{color:#6b7f80;font-size:12px}
 .field input:focus,.field select:focus{border-color:#328663;box-shadow:0 0 0 3px #d9f2e4}
 .field small{font-size:11px;line-height:1.5;color:#7d8d91}
 .field-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}

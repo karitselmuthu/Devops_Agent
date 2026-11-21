@@ -218,3 +218,69 @@ def test_app_api_previews_locally_and_requires_admin_for_aws_approval(monkeypatc
     assert aws.post(f"/apps/{deployment_id}/approve", headers=operator).status_code == 403
     assert aws.post(f"/apps/{deployment_id}/approve", headers=admin).json()["status"] == "APPROVED"
     assert len(store.pending_jobs()) == 1
+
+
+def _config_request(**extra) -> dict:
+    return {"repository_url": "https://github.com/acme/web-app", "name": "web-app", "port": 8080, **extra}
+
+
+def test_environment_and_secret_references_are_accepted() -> None:
+    req = AppPlanRequest.model_validate(_config_request(
+        environment_variables={"LOG_LEVEL": "info", "FEATURE_X": "on"},
+        secret_refs={"OPENAI_API_KEY": "agents-app/web-app/OPENAI_API_KEY"},
+    ))
+    assert req.environment_variables["LOG_LEVEL"] == "info"
+    assert req.secret_refs == {"OPENAI_API_KEY": "agents-app/web-app/OPENAI_API_KEY"}
+
+
+@pytest.mark.parametrize("name", ["lower", "1BAD", "HAS-DASH", "AWS_SECRET", "ECS_X", "A" * 65, ""])
+def test_environment_variable_names_are_restricted(name: str) -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(environment_variables={name: "x"}))
+
+
+@pytest.mark.parametrize("value", ["a\nb", "x" * 513])
+def test_environment_variable_values_are_restricted(value: str) -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(environment_variables={"OK": value}))
+
+
+def test_too_many_variables_are_rejected() -> None:
+    many = {f"V{i}": "x" for i in range(31)}
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(environment_variables=many))
+
+
+@pytest.mark.parametrize("ref", [
+    "other-app/web-app/KEY", "agents-app/other/KEY", "agents-app/web-app/../x", "agents-app/web-app/",
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:agents-app/web-app/KEY", "agents-app/web-app/a b",
+])
+def test_secret_references_must_live_under_the_apps_own_prefix(ref: str) -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(secret_refs={"KEY": ref}))
+
+
+def test_a_name_cannot_be_both_plain_and_secret() -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(
+            environment_variables={"KEY": "x"}, secret_refs={"KEY": "agents-app/web-app/KEY"},
+        ))
+
+
+def test_secret_name_prefix_uses_the_inferred_app_name(monkeypatch) -> None:
+    req = AppPlanRequest.model_validate({
+        "repository_url": "https://github.com/acme/Web_App",
+        "secret_refs": {"KEY": "agents-app/web-app/KEY"},
+    })
+    assert req.name == "web-app"
+
+
+def test_plan_lists_secret_prerequisites_without_values(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {"Dockerfile": "FROM python:3.12-slim\nEXPOSE 8000\n"})
+    plan = create_app_plan(AppPlanRequest(
+        repository_url="https://github.com/acme/web-app", name="web-app",
+        environment_variables={"LOG_LEVEL": "info"},
+        secret_refs={"OPENAI_API_KEY": "agents-app/web-app/OPENAI_API_KEY"},
+    ), "operator-1")
+    assert any("agents-app/web-app/OPENAI_API_KEY" in item for item in plan.prerequisites)
+    assert "Secrets Manager" in [item.service for item in plan.resources]

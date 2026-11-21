@@ -32,6 +32,11 @@ class DeploymentKind(StrEnum):
     SAM_LAMBDA = "sam_lambda"
 
 
+ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+RESERVED_ENV_PREFIXES = ("AWS_", "ECS_")
+MAX_CONFIG_ENTRIES = 30
+
+
 class AppPlanRequest(BaseModel):
     repository_url: str = Field(min_length=1, max_length=512)
     ref: str = Field(default="main", min_length=1, max_length=255)
@@ -39,6 +44,10 @@ class AppPlanRequest(BaseModel):
     environment: Literal["staging", "production"] = "staging"
     port: int | None = Field(default=None, ge=1, le=65535)
     health_path: str = Field(default="/health", pattern=r"^/[A-Za-z0-9/_-]*$", max_length=256)
+    # Plain (non-secret) settings; visible in the plan and the task definition. Never put secrets here.
+    environment_variables: dict[str, str] = Field(default_factory=dict)
+    # NAME -> Secrets Manager secret name under agents-app/<app name>/; the platform never sees the value.
+    secret_refs: dict[str, str] = Field(default_factory=dict)
     # Relative to the repository root; the image is always built with the repository root as context.
     dockerfile_path: str = Field(default="Dockerfile", pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$", max_length=256)
 
@@ -58,6 +67,24 @@ class AppPlanRequest(BaseModel):
             if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", name):
                 raise ValueError("Repository name cannot become a valid app name; provide one explicitly")
             self.name = name
+        return self
+
+    @model_validator(mode="after")
+    def valid_configuration(self) -> "AppPlanRequest":
+        if len(self.environment_variables) + len(self.secret_refs) > MAX_CONFIG_ENTRIES:
+            raise ValueError(f"At most {MAX_CONFIG_ENTRIES} environment variables and secret references are allowed")
+        for name, value in self.environment_variables.items():
+            if not ENV_NAME.fullmatch(name) or name.startswith(RESERVED_ENV_PREFIXES):
+                raise ValueError(f"Invalid environment variable name: {name!r}")
+            if len(value) > 512 or "\n" in value or "\r" in value:
+                raise ValueError(f"Invalid value for {name}: at most 512 characters, one line")
+        for name, secret in self.secret_refs.items():
+            if not ENV_NAME.fullmatch(name) or name.startswith(RESERVED_ENV_PREFIXES):
+                raise ValueError(f"Invalid secret variable name: {name!r}")
+            if not re.fullmatch(rf"agents-app/{re.escape(self.name)}/[A-Za-z0-9_.-]{{1,128}}", secret) or ".." in secret:
+                raise ValueError(f"Secret {name} must be named agents-app/{self.name}/<KEY>")
+        if set(self.environment_variables) & set(self.secret_refs):
+            raise ValueError("A variable cannot be both a plain value and a secret")
         return self
 
     def source_target(self) -> GitHubSourceTarget:
@@ -167,6 +194,18 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
         ] if kind == DeploymentKind.SAM_LAMBDA else []),
         access_mode="aws_iam" if kind == DeploymentKind.SAM_LAMBDA else "public_https",
     )
+    if kind == DeploymentKind.SAM_LAMBDA and (request.environment_variables or request.secret_refs):
+        raise ValueError("Environment variables and secret references are supported for container apps only; "
+                         "a SAM app defines its own configuration in template.yaml")
+    if request.secret_refs:
+        deployment.resources.append(PlannedResource(
+            service="Secrets Manager", name=f"{len(request.secret_refs)} secret reference(s), read-only",
+            purpose="Inject secrets into the container at start; the platform never stores the values",
+        ))
+        deployment.prerequisites += [
+            f"Create secret {secret} in Secrets Manager (us-east-1) before approval; it is injected as {name}."
+            for name, secret in request.secret_refs.items()
+        ]
     suffix = deployment.id.hex[:12]
     deployment.ecr_repository = f"agents-app-{request.environment}-{suffix}"
     deployment.stack_name = f"AgentsApp-{request.environment}-{suffix}"
