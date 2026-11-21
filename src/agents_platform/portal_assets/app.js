@@ -342,6 +342,10 @@ deployForm.addEventListener('submit', async (event) => {
     button.disabled = false;
     return;
   }
+  const [cpu, memory] = (draft.size || '256,512').split(',').map(Number);
+  draft.cpu = cpu;
+  draft.memory_mib = memory;
+  delete draft.size;
   delete draft.environment_text;
   delete draft.secrets_text;
   draft.port = draft.port ? Number(draft.port) : null;

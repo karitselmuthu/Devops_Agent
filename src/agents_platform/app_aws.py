@@ -118,7 +118,7 @@ def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformReso
             "AppTaskDefinition": {
                 "Type": "AWS::ECS::TaskDefinition",
                 "Properties": {
-                    "Family": service_name, "Cpu": "256", "Memory": "512",
+                    "Family": service_name, "Cpu": str(plan.request.cpu), "Memory": str(plan.request.memory_mib),
                     "NetworkMode": "awsvpc", "RequiresCompatibilities": ["FARGATE"],
                     "ExecutionRoleArn": platform.task_execution_role_arn,
                     "ContainerDefinitions": [{
