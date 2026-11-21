@@ -4,10 +4,10 @@ This diagram describes the deployment paths now in `main`, based on the staging 
 
 | Blueprint | Application deployment path |
 | --- | --- |
-| Container | Dockerfile (root, or an optional path) → CodeBuild → ECR → ECS Fargate, shared ALB routing, and application CloudFront URL |
+| Container | Dockerfile (root, or an optional path) → CodeBuild → ECR → ECS Fargate (chosen CPU and memory, optional settings and Secrets Manager references), shared ALB routing, and application CloudFront URL |
 | Restricted SAM | Root SAM template → separate CodeBuild project → Lambda, on-demand DynamoDB, and IAM-protected Function URL |
 
-The SAM path was added in [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5). It still needs a live staging deployment test before its AWS integration is confirmed.
+The SAM path was added in [PR #5](https://github.com/karitselmuthu/Devops_Agent/pull/5) and has run end to end on AWS staging. The container path, including Dockerfile paths, app settings, secret references and task sizes, is covered by tests and a synthesized template but has not yet run on AWS.
 
 ```mermaid
 flowchart LR
@@ -33,6 +33,7 @@ flowchart LR
         AppWorker --> NAT
     end
 
+    AppSecrets[Secrets Manager: operator-created agents-app/* secrets] -->|Injected at container start| AppECS
     Secrets[Secrets Manager: GitHub token, OpenAI key, DB credentials] --> API
     Secrets --> Agents
     Secrets --> AppWorker
@@ -80,14 +81,14 @@ flowchart LR
 
 ## Deployment and status flow
 
-1. The operator signs in through Cognito, submits a GitHub repository and target settings, and reviews the generated resource plan in the portal. Creating a plan does not create AWS resources. An administrator must approve deployment.
+1. The operator signs in through Cognito, submits a GitHub repository and target settings (port, health path, Dockerfile path, task size, settings, secret references), and reviews the generated resource plan in the portal. Creating a plan does not create AWS resources. An administrator must approve deployment.
 2. After approval, the application deploy worker uploads the pinned source to S3. The Dockerfile path builds and pushes an image to ECR. The SAM path packages a Lambda zip in a separate CodeBuild project.
 3. The container path waits for a CloudFormation change set and checks the application's HTTP health path after stack creation. The SAM path additionally checks the change set's resource types before execution and invokes the Lambda with an invalid request as a limited smoke check. `RUNNING` does not establish Bedrock access or working S3 Vectors retrieval. Its Function URL requires a SigV4-signed request; opening it directly in a browser returns 403.
 4. The portal reads application state from the platform database. GitHub Actions and CloudFormation record platform deployment status; CodeBuild, CloudFormation, ECS events, Lambda logs, and CloudWatch Logs provide application details.
 
 ## Cost and cleanup boundaries
 
-- The platform keeps a NAT gateway, RDS instance, load balancer, and Fargate services running while staging is up. These are ongoing costs even when no application is deployed.
-- A Dockerfile application adds a Fargate service and CloudFront distribution. A SAM application adds Lambda requests, an on-demand DynamoDB table, and Bedrock usage when called. CodeBuild charges for builds; ECR and S3 charge for retained data. The platform S3 source bucket has a one-day object expiration rule.
-- Portal deletion removes the application CloudFormation stack, its ECR repository for containers or S3 zip artifact for SAM, and the temporary source archive. Platform teardown deletes managed application stacks and tagged ECR repositories before destroying the platform stack; with teardown enabled, the platform S3 bucket is emptied. S3 Vectors is created outside this platform and needs separate cleanup. A Lambda log group created on first invocation may also remain after deleting a SAM stack; verify it in CloudWatch Logs. Check retained data and AWS billing after cleanup.
+- The platform keeps a NAT gateway, RDS instance, load balancer, and Fargate services running while staging is up, roughly $2-3 per day even when no application is deployed.
+- A Dockerfile application adds a Fargate service (cost grows with the chosen CPU and memory, from 0.25 vCPU / 0.5 GB up to 2 vCPU / 16 GB) and CloudFront distribution. Secrets you create under `agents-app/` bill per secret per month and are not deleted with the app. A SAM application adds Lambda requests, an on-demand DynamoDB table, and Bedrock usage when called. CodeBuild charges for builds; ECR and S3 charge for retained data. The platform S3 source bucket has a one-day object expiration rule.
+- Portal deletion removes the application CloudFormation stack, its ECR repository for containers or S3 zip artifact for SAM, and the temporary source archive. Platform teardown deletes managed application stacks and tagged ECR repositories before destroying the platform stack; with teardown enabled, the platform S3 bucket is emptied. S3 Vectors is created outside this platform and needs separate cleanup. A Lambda log group created on first invocation may also remain after deleting a SAM stack; verify it in CloudWatch Logs. Some platform resources are retained by design (for example RDS snapshots, the CDK asset bucket and the queue KMS key); `scripts/aws_cleanup.py --mode leftovers` or `--mode all` handles them. Check retained data and AWS billing after cleanup.
 - To reduce chat usage, watch GitHub Actions for platform deployments and use the portal's status page plus AWS Console events and logs for application deployments. Chat polling is unnecessary for routine status tracking.
