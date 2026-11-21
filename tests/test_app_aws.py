@@ -208,3 +208,25 @@ def test_build_deploy_and_cleanup_with_injected_aws_clients(monkeypatch) -> None
     assert store.get(deployment.id).status == DeploymentStatus.DELETED
     assert store.get(deployment.id).error is None
     assert "delete_stack" in calls and "delete_ecr" in calls
+
+
+def test_template_injects_plain_variables_and_secret_references_only() -> None:
+    deployment = plan()
+    deployment.request.environment_variables = {"LOG_LEVEL": "info"}
+    deployment.request.secret_refs = {"OPENAI_API_KEY": "agents-app/web-app/OPENAI_API_KEY"}
+    template = ecs_app_template(
+        deployment, "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:abc",
+        platform(), listener_priority=1001, route_token="token",
+    )
+    container = template["Resources"]["AppTaskDefinition"]["Properties"]["ContainerDefinitions"][0]
+    assert container["Environment"] == [{"Name": "LOG_LEVEL", "Value": "info"}]
+    assert container["Secrets"] == [{"Name": "OPENAI_API_KEY", "ValueFrom": "agents-app/web-app/OPENAI_API_KEY"}]
+
+
+def test_template_has_no_environment_or_secrets_when_none_are_configured() -> None:
+    template = ecs_app_template(
+        plan(), "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:abc",
+        platform(), listener_priority=1001, route_token="token",
+    )
+    container = template["Resources"]["AppTaskDefinition"]["Properties"]["ContainerDefinitions"][0]
+    assert "Environment" not in container and "Secrets" not in container

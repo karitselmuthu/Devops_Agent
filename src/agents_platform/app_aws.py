@@ -38,6 +38,20 @@ class PlatformResources:
     vpc_origin_id: str | None
 
 
+def _container_configuration(plan: AppDeployment) -> dict:
+    """Plain variables and Secrets Manager references; secret values are resolved by ECS at start."""
+    configuration: dict = {}
+    if plan.request.environment_variables:
+        configuration["Environment"] = [
+            {"Name": name, "Value": value} for name, value in sorted(plan.request.environment_variables.items())
+        ]
+    if plan.request.secret_refs:
+        configuration["Secrets"] = [
+            {"Name": name, "ValueFrom": secret} for name, secret in sorted(plan.request.secret_refs.items())
+        ]
+    return configuration
+
+
 def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformResources,
                      *, listener_priority: int, route_token: str) -> dict:
     """Create app-owned resources while reusing the platform cluster, ALB and VPC."""
@@ -110,6 +124,7 @@ def ecs_app_template(plan: AppDeployment, image_uri: str, platform: PlatformReso
                     "ContainerDefinitions": [{
                         "Name": "Web", "Image": image_uri, "Essential": True,
                         "PortMappings": [{"ContainerPort": port, "Protocol": "tcp"}],
+                        **_container_configuration(plan),
                         "LogConfiguration": {
                             "LogDriver": "awslogs",
                             "Options": {

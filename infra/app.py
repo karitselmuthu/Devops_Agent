@@ -294,6 +294,11 @@ class AgentsPlatformStack(Stack):
             resources=[f"arn:{self.partition}:ecr:{self.region}:{self.account}:repository/agents-app-*"],
         ))
         image_log.grant_write(app_execution_role)
+        # Apps may reference only secrets the operator created under agents-app/ (injected by ECS at start).
+        app_execution_role.add_to_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[f"arn:{self.partition}:secretsmanager:{self.region}:{self.account}:secret:agents-app/*"],
+        ))
 
         def task_definition(role: str, command: list[str] | None = None,
                             extra_env: dict[str, str] | None = None,
