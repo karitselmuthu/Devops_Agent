@@ -230,3 +230,14 @@ def test_template_has_no_environment_or_secrets_when_none_are_configured() -> No
     )
     container = template["Resources"]["AppTaskDefinition"]["Properties"]["ContainerDefinitions"][0]
     assert "Environment" not in container and "Secrets" not in container
+
+
+def test_template_uses_requested_cpu_and_memory() -> None:
+    deployment = plan()
+    deployment.request.cpu, deployment.request.memory_mib = 1024, 4096
+    template = ecs_app_template(
+        deployment, "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:abc",
+        platform(), listener_priority=1001, route_token="token",
+    )
+    props = template["Resources"]["AppTaskDefinition"]["Properties"]
+    assert (props["Cpu"], props["Memory"]) == ("1024", "4096")

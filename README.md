@@ -153,6 +153,7 @@ is intentionally narrow: one Python 3.12 `Api` function with `CodeUri: build/`,
 a root `build.sh`, IAM URL authentication, and only the resource and IAM shapes
 accepted by `sam_blueprint.py`. Other templates are rejected during planning.
 
+Container apps run at 0.25 vCPU / 0.5 GB unless you pick a larger **Task size** (up to 2 vCPU / 16 GB, valid Fargate pairs only; larger costs more while running).
 Container apps can also take configuration. **Settings** (`KEY=value`) are written
 into the task definition and are visible in the plan, so never put secrets there.
 **Secret references** (`KEY=agents-app/<app-name>/<KEY>`) name a secret you create

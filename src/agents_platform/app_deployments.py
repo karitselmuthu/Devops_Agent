@@ -37,6 +37,13 @@ class DeploymentKind(StrEnum):
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 RESERVED_ENV_PREFIXES = ("AWS_", "ECS_")
 MAX_CONFIG_ENTRIES = 30
+# Valid Fargate CPU (units) -> memory (MiB); capped at 2 vCPU / 16 GB to bound cost.
+FARGATE_MEMORY = {
+    256: (512, 1024, 2048),
+    512: tuple(range(1024, 4097, 1024)),
+    1024: tuple(range(2048, 8193, 1024)),
+    2048: tuple(range(4096, 16385, 1024)),
+}
 
 
 class AppPlanRequest(BaseModel):
@@ -47,6 +54,9 @@ class AppPlanRequest(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     health_path: str = Field(default="/health", pattern=r"^/[A-Za-z0-9/_-]*$", max_length=256)
     # Plain (non-secret) settings; visible in the plan and the task definition. Never put secrets here.
+    # Fargate task size; defaults match what every app got before this was configurable.
+    cpu: int = 256
+    memory_mib: int = 512
     environment_variables: dict[str, str] = Field(default_factory=dict)
     # NAME -> Secrets Manager secret name under agents-app/<app name>/; the platform never sees the value.
     secret_refs: dict[str, str] = Field(default_factory=dict)
@@ -73,6 +83,9 @@ class AppPlanRequest(BaseModel):
 
     @model_validator(mode="after")
     def valid_configuration(self) -> "AppPlanRequest":
+        if self.memory_mib not in FARGATE_MEMORY.get(self.cpu, ()):
+            raise ValueError(f"{self.cpu} CPU units allow memory of {FARGATE_MEMORY.get(self.cpu, 'n/a')} MiB only"
+                             if self.cpu in FARGATE_MEMORY else "cpu must be 256, 512, 1024 or 2048")
         if len(self.environment_variables) + len(self.secret_refs) > MAX_CONFIG_ENTRIES:
             raise ValueError(f"At most {MAX_CONFIG_ENTRIES} environment variables and secret references are allowed")
         for name, value in self.environment_variables.items():
@@ -239,7 +252,7 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
         resources=sam_resources() if kind == DeploymentKind.SAM_LAMBDA else [
             PlannedResource(service="ECR", name="Application image repository", purpose="Store built images"),
             PlannedResource(service="CodeBuild", name="Container build", purpose="Build and push one image", billed_while_running=True),
-            PlannedResource(service="ECS Fargate", name="Web service", purpose="Run the container in the shared cluster", billed_while_running=True),
+            PlannedResource(service="ECS Fargate", name="Web service", purpose=f"Run the container in the shared cluster ({request.cpu / 1024:g} vCPU, {request.memory_mib / 1024:g} GB)", billed_while_running=True),
             PlannedResource(service="Application Load Balancer", name="Routing rule", purpose="Route this app through the platform load balancer"),
             PlannedResource(service="CloudFront", name="Application HTTPS URL", purpose="Give the app a separate HTTPS address; usage billed"),
         ],

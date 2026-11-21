@@ -343,3 +343,22 @@ def test_repository_with_nothing_deployable_gets_actionable_guidance(monkeypatch
         create_app_plan(AppPlanRequest(repository_url="https://github.com/acme/trainer"), "operator-1")
     message = str(error.value)
     assert "no Dockerfile" in message and "HTTP server" in message and "template.yaml" in message
+
+
+def test_cpu_and_memory_default_to_the_smallest_size() -> None:
+    req = AppPlanRequest.model_validate(_config_request())
+    assert (req.cpu, req.memory_mib) == (256, 512)
+
+
+@pytest.mark.parametrize("cpu,memory", [(256, 2048), (512, 4096), (1024, 8192), (2048, 16384)])
+def test_valid_fargate_sizes_are_accepted(cpu: int, memory: int) -> None:
+    req = AppPlanRequest.model_validate(_config_request(cpu=cpu, memory_mib=memory))
+    assert (req.cpu, req.memory_mib) == (cpu, memory)
+
+
+@pytest.mark.parametrize("cpu,memory", [
+    (256, 4096), (512, 512), (1024, 1024), (2048, 2048), (300, 512), (4096, 8192), (256, 1536), (1024, 32768),
+])
+def test_invalid_fargate_sizes_are_rejected(cpu: int, memory: int) -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest.model_validate(_config_request(cpu=cpu, memory_mib=memory))
