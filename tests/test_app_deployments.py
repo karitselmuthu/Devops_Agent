@@ -79,6 +79,59 @@ def test_plan_requires_root_dockerfile_and_pins_commit(monkeypatch) -> None:
         create_app_plan(request(), "operator-1")
 
 
+def _fake_checkout(monkeypatch, files: dict[str, str]) -> None:
+    def checkout(_target, destination: Path) -> None:
+        destination.mkdir()
+        for name, text in files.items():
+            (destination / name).parent.mkdir(parents=True, exist_ok=True)
+            (destination / name).write_text(text)
+
+    monkeypatch.setattr(app_deployments, "checkout_source", checkout)
+    monkeypatch.setattr(
+        app_deployments.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "a" * 40 + "\n", ""),
+    )
+
+
+def test_plan_can_use_a_dockerfile_in_a_subdirectory(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {
+        "simulation/live_stack/Dockerfile":
+            'FROM python:3.12-slim\nEXPOSE 8765\nHEALTHCHECK CMD python -c "http://127.0.0.1:8765/ready"\n',
+    })
+    plan = create_app_plan(AppPlanRequest(
+        repository_url="https://github.com/acme/web-app",
+        dockerfile_path="simulation/live_stack/Dockerfile",
+    ), "operator-1")
+    assert plan.request.dockerfile_path == "simulation/live_stack/Dockerfile"
+    assert plan.request.port == 8765
+    assert plan.request.health_path == "/ready"
+
+
+def test_missing_dockerfile_names_other_dockerfiles_it_found(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {"simulation/live_stack/Dockerfile": "FROM scratch\n"})
+    with pytest.raises(ValueError, match="simulation/live_stack/Dockerfile"):
+        create_app_plan(AppPlanRequest(repository_url="https://github.com/acme/web-app"), "operator-1")
+
+
+@pytest.mark.parametrize("bad", ["../Dockerfile", "/etc/passwd", "a/../../Dockerfile", "-f/x", "a b/Dockerfile", ".."])
+def test_dockerfile_path_cannot_escape_the_repository(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        AppPlanRequest(repository_url="https://github.com/acme/web-app", dockerfile_path=bad)
+
+
+def test_dockerfile_symlink_outside_repository_is_rejected(monkeypatch, tmp_path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("EXPOSE 22\n")
+
+    def checkout(_target, destination: Path) -> None:
+        destination.mkdir()
+        (destination / "Dockerfile").symlink_to(secret)
+
+    monkeypatch.setattr(app_deployments, "checkout_source", checkout)
+    with pytest.raises(ValueError, match="Dockerfile"):
+        create_app_plan(request(), "operator-1")
+
+
 @pytest.mark.parametrize("durable", [False, True])
 def test_approval_and_deletion_have_idempotent_outbox(tmp_path: Path, durable: bool) -> None:
     if durable:

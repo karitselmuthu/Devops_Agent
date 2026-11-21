@@ -139,7 +139,7 @@ class AgentsPlatformStack(Stack):
                     "pre_build": {"commands": [
                         'aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "${IMAGE_URI%%/*}"',
                     ]},
-                    "build": {"commands": ['docker build --pull -t "$IMAGE_URI" .']},
+                    "build": {"commands": ['docker build --pull -f "${DOCKERFILE_PATH:-Dockerfile}" -t "$IMAGE_URI" .']},
                     "post_build": {"commands": ['docker push "$IMAGE_URI"']},
                 },
             }),

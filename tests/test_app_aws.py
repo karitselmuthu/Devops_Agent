@@ -150,6 +150,8 @@ def test_build_deploy_and_cleanup_with_injected_aws_clients(monkeypatch) -> None
         def start_build(self, **kwargs):
             calls.append("start_build")
             assert kwargs["sourceTypeOverride"] == "S3"
+            env = {item["name"]: item["value"] for item in kwargs["environmentVariablesOverride"]}
+            assert env["DOCKERFILE_PATH"] == deployment.request.dockerfile_path
             return {"build": {"id": "build-1"}}
 
         def batch_get_builds(self, **kwargs):

@@ -145,7 +145,7 @@ developer machine.
 
 The portal has two flows: source checks and application deployment. Deployment
 planning inspects a pinned GitHub commit and chooses a supported blueprint. A
-root `Dockerfile` uses CodeBuild, ECR, the shared ECS cluster and load balancer,
+`Dockerfile` (at the repository root, or at an optional **Dockerfile path** built with the repository root as context) uses CodeBuild, ECR, the shared ECS cluster and load balancer,
 and a separate CloudFront URL. A supported root `template.yaml` using the AWS
 SAM transform uses an isolated CodeBuild project, a Lambda function, an on-demand
 DynamoDB table, and an IAM-protected Lambda Function URL. The current SAM adapter
