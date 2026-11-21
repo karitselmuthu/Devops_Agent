@@ -284,3 +284,62 @@ def test_plan_lists_secret_prerequisites_without_values(monkeypatch) -> None:
     ), "operator-1")
     assert any("agents-app/web-app/OPENAI_API_KEY" in item for item in plan.prerequisites)
     assert "Secrets Manager" in [item.service for item in plan.resources]
+
+
+COMPOSE = """
+services:
+  live-demo:
+    build:
+      context: .
+      dockerfile: simulation/live_stack/Dockerfile
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/ready')"]
+  other:
+    build: ./other
+    ports: ["9000:80"]
+"""
+
+
+def test_missing_port_is_suggested_from_compose_but_not_applied(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {
+        "simulation/live_stack/Dockerfile": "FROM scratch\n",
+        "compose.yaml": COMPOSE,
+    })
+    with pytest.raises(ValueError) as error:
+        create_app_plan(AppPlanRequest(
+            repository_url="https://github.com/acme/web-app",
+            dockerfile_path="simulation/live_stack/Dockerfile",
+        ), "operator-1")
+    message = str(error.value)
+    assert "could not be inferred" in message
+    assert "8765" in message and "live-demo" in message and "/ready" in message
+    assert "9000" not in message  # a different service's port must not be suggested
+
+
+@pytest.mark.parametrize("entry,expected", [
+    ('"8080:80"', 80), ('"127.0.0.1:8765:8765"', 8765), ('"8000"', 8000),
+    ("{target: 3000, published: 80}", 3000),
+])
+def test_compose_port_forms(monkeypatch, entry: str, expected: int) -> None:
+    _fake_checkout(monkeypatch, {
+        "Dockerfile": "FROM scratch\n",
+        "docker-compose.yml": f"services:\n  web:\n    build: .\n    ports: [{entry}]\n",
+    })
+    with pytest.raises(ValueError, match=str(expected)):
+        create_app_plan(AppPlanRequest(repository_url="https://github.com/acme/web-app"), "operator-1")
+
+
+def test_malformed_or_hostile_compose_file_is_ignored(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {"Dockerfile": "FROM scratch\n", "compose.yaml": "services: [unclosed\n"})
+    with pytest.raises(ValueError, match="could not be inferred"):
+        create_app_plan(AppPlanRequest(repository_url="https://github.com/acme/web-app"), "operator-1")
+
+
+def test_repository_with_nothing_deployable_gets_actionable_guidance(monkeypatch) -> None:
+    _fake_checkout(monkeypatch, {"train.py": "print('train')\n", "requirements.txt": "torch\n"})
+    with pytest.raises(ValueError) as error:
+        create_app_plan(AppPlanRequest(repository_url="https://github.com/acme/trainer"), "operator-1")
+    message = str(error.value)
+    assert "no Dockerfile" in message and "HTTP server" in message and "template.yaml" in message

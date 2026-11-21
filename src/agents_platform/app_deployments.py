@@ -2,6 +2,7 @@
 
 import subprocess
 import re
+import posixpath
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -9,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 from uuid import UUID, uuid4
 
+import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from agents_platform.portal import RepositoryDraft
@@ -124,6 +126,59 @@ class AppDeployment(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+
+
+def _compose_port(entry: object) -> int | None:
+    """Container port of one compose `ports` entry: "8080:80", "127.0.0.1:8765:8765", "8000" or a mapping."""
+    if isinstance(entry, dict):
+        target = entry.get("target")
+        return target if isinstance(target, int) else None
+    match = re.fullmatch(r"(?:[^:]+:)*?(\d+)(?:/tcp)?", str(entry).strip())
+    return int(match.group(1)) if match else None
+
+
+def compose_hint(repository: Path, dockerfile_path: str) -> str | None:
+    """Suggest a port and health path from a compose file; never applied automatically."""
+    for name in COMPOSE_FILES:
+        path = repository / name
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 256_000:
+            break
+    else:
+        return None
+    try:
+        services = (yaml.safe_load(path.read_text(errors="replace")) or {}).get("services") or {}
+    except (yaml.YAMLError, AttributeError):
+        return None
+    if not isinstance(services, dict):
+        return None
+    wanted = posixpath.normpath(dockerfile_path)
+    candidates = []
+    for service, spec in services.items():
+        if not isinstance(spec, dict):
+            continue
+        build = spec.get("build")
+        if isinstance(build, str):
+            build = {"context": build}
+        if not isinstance(build, dict):
+            continue
+        context = str(build.get("context", "."))
+        used = posixpath.normpath(posixpath.join(context, str(build.get("dockerfile", "Dockerfile"))))
+        if used == wanted:
+            candidates.append((service, spec))
+    if len(candidates) != 1:
+        return None
+    service, spec = candidates[0]
+    ports = [port for port in map(_compose_port, spec.get("ports") or []) if port]
+    if len(ports) != 1:
+        return None
+    hint = f"{path.name} runs service '{service}' on port {ports[0]}"
+    health = re.search(rf"(?:127\.0\.0\.1|localhost):{ports[0]}(/[A-Za-z0-9/_-]*)", str(spec.get("healthcheck", "")))
+    if health:
+        hint += f" with health path {health.group(1)}"
+    return hint + "; enter these values if they are right"
+
+
 def _missing_message(repository: Path, dockerfile_path: str) -> str:
     found = sorted(
         path.relative_to(repository).as_posix() for path in repository.rglob("Dockerfile")
@@ -132,6 +187,10 @@ def _missing_message(repository: Path, dockerfile_path: str) -> str:
     message = f"A root Dockerfile (or the Dockerfile path you gave: {dockerfile_path}) or supported SAM template.yaml is required"
     if found:
         message += f". Dockerfiles found in this repository: {', '.join(found)}; enter one as the Dockerfile path"
+    else:
+        message += (". This repository has no Dockerfile or SAM template, so the platform cannot deploy it "
+                    "(for example training or notebook code). Add a Dockerfile that starts an HTTP server, "
+                    "or a supported root template.yaml")
     return message
 
 
@@ -153,7 +212,9 @@ def create_app_plan(request: AppPlanRequest, created_by: str) -> AppDeployment:
             if request.port is None:
                 exposed = re.findall(r"(?im)^\s*EXPOSE\s+(\d+)(?:/tcp)?\s*(?:#.*)?$", docker_text)
                 if len(exposed) != 1:
-                    raise ValueError("Container HTTP port could not be inferred; provide one explicitly")
+                    suggestion = compose_hint(repository, request.dockerfile_path)
+                    raise ValueError("Container HTTP port could not be inferred; provide one explicitly"
+                                     + (f" ({suggestion})" if suggestion else ""))
                 request.port = int(exposed[0])
             if request.health_path == "/health":
                 health = re.search(

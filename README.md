@@ -153,6 +153,17 @@ is intentionally narrow: one Python 3.12 `Api` function with `CodeUri: build/`,
 a root `build.sh`, IAM URL authentication, and only the resource and IAM shapes
 accepted by `sam_blueprint.py`. Other templates are rejected during planning.
 
+Container apps can also take configuration. **Settings** (`KEY=value`) are written
+into the task definition and are visible in the plan, so never put secrets there.
+**Secret references** (`KEY=agents-app/<app-name>/<KEY>`) name a secret you create
+yourself in AWS Secrets Manager; ECS injects its value when the container starts,
+so the platform never stores or sees it. The shared execution role can read only
+secrets under `agents-app/`. Names starting `AWS_` or `ECS_` are reserved, and
+SAM apps keep their configuration in `template.yaml`. When a Dockerfile has no
+single `EXPOSE`, the planner reads a `compose.yaml` and suggests the port and
+health path, but you still enter them explicitly. A repository with no
+Dockerfile or SAM template is refused with guidance on what to add.
+
 The plan shows the blueprint, pinned commit, resources, cost drivers, and
 prerequisites. An administrator approves it before any build or resource
 creation. The SAM build runs without deployment permissions. The worker checks
